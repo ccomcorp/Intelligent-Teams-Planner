@@ -1,0 +1,224 @@
+-- Database functions and triggers for Intelligent Teams Planner
+
+-- Function to update the updated_at timestamp
+CREATE OR REPLACE FUNCTION update_updated_at_column()
+RETURNS TRIGGER AS $$
+BEGIN
+    NEW.updated_at = CURRENT_TIMESTAMP;
+    RETURN NEW;
+END;
+$$ language 'plpgsql';
+
+-- Triggers to automatically update updated_at columns
+-- Note: These will be created after tables exist via SQLAlchemy
+
+-- Function to clean up expired tokens
+CREATE OR REPLACE FUNCTION cleanup_expired_tokens()
+RETURNS INTEGER AS $$
+DECLARE
+    deleted_count INTEGER;
+BEGIN
+    DELETE FROM token_storage
+    WHERE expires_at < CURRENT_TIMESTAMP;
+
+    GET DIAGNOSTICS deleted_count = ROW_COUNT;
+    RETURN deleted_count;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Function to clean up old conversation contexts (older than 30 days)
+CREATE OR REPLACE FUNCTION cleanup_old_conversations()
+RETURNS INTEGER AS $$
+DECLARE
+    deleted_count INTEGER;
+BEGIN
+    DELETE FROM conversation_contexts
+    WHERE last_activity < (CURRENT_TIMESTAMP - INTERVAL '30 days');
+
+    GET DIAGNOSTICS deleted_count = ROW_COUNT;
+    RETURN deleted_count;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Function to get user statistics
+CREATE OR REPLACE FUNCTION get_user_stats(user_id_param VARCHAR)
+RETURNS JSON AS $$
+DECLARE
+    result JSON;
+BEGIN
+    SELECT json_build_object(
+        'total_plans', (
+            SELECT COUNT(*) FROM plans
+            WHERE owner_id = user_id_param AND is_archived = false
+        ),
+        'total_tasks', (
+            SELECT COUNT(*) FROM tasks t
+            JOIN plans p ON t.plan_graph_id = p.graph_id
+            WHERE p.owner_id = user_id_param
+        ),
+        'completed_tasks', (
+            SELECT COUNT(*) FROM tasks t
+            JOIN plans p ON t.plan_graph_id = p.graph_id
+            WHERE p.owner_id = user_id_param AND t.is_completed = true
+        ),
+        'overdue_tasks', (
+            SELECT COUNT(*) FROM tasks t
+            JOIN plans p ON t.plan_graph_id = p.graph_id
+            WHERE p.owner_id = user_id_param
+            AND t.due_date < CURRENT_DATE
+            AND t.is_completed = false
+        ),
+        'tasks_due_this_week', (
+            SELECT COUNT(*) FROM tasks t
+            JOIN plans p ON t.plan_graph_id = p.graph_id
+            WHERE p.owner_id = user_id_param
+            AND t.due_date BETWEEN CURRENT_DATE AND (CURRENT_DATE + INTERVAL '7 days')
+            AND t.is_completed = false
+        )
+    ) INTO result;
+
+    RETURN result;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Function to search across plans and tasks
+CREATE OR REPLACE FUNCTION search_planner_content(
+    search_query TEXT,
+    user_id_param VARCHAR DEFAULT NULL,
+    limit_param INTEGER DEFAULT 20
+)
+RETURNS TABLE(
+    content_type VARCHAR,
+    id UUID,
+    title VARCHAR,
+    description TEXT,
+    rank REAL
+) AS $$
+BEGIN
+    RETURN QUERY
+    (
+        -- Search in plans
+        SELECT
+            'plan'::VARCHAR as content_type,
+            p.id,
+            p.title,
+            p.description,
+            ts_rank(to_tsvector('english', p.title || ' ' || COALESCE(p.description, '')), plainto_tsquery('english', search_query)) as rank
+        FROM plans p
+        WHERE
+            (user_id_param IS NULL OR p.owner_id = user_id_param)
+            AND p.is_archived = false
+            AND to_tsvector('english', p.title || ' ' || COALESCE(p.description, '')) @@ plainto_tsquery('english', search_query)
+    )
+    UNION ALL
+    (
+        -- Search in tasks
+        SELECT
+            'task'::VARCHAR as content_type,
+            t.id,
+            t.title,
+            t.description,
+            ts_rank(to_tsvector('english', t.title || ' ' || COALESCE(t.description, '')), plainto_tsquery('english', search_query)) as rank
+        FROM tasks t
+        JOIN plans p ON t.plan_graph_id = p.graph_id
+        WHERE
+            (user_id_param IS NULL OR p.owner_id = user_id_param)
+            AND to_tsvector('english', t.title || ' ' || COALESCE(t.description, '')) @@ plainto_tsquery('english', search_query)
+    )
+    ORDER BY rank DESC
+    LIMIT limit_param;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Function to calculate task completion percentage for a plan
+CREATE OR REPLACE FUNCTION calculate_plan_completion(plan_graph_id_param VARCHAR)
+RETURNS NUMERIC AS $$
+DECLARE
+    total_tasks INTEGER;
+    completed_tasks INTEGER;
+    completion_percentage NUMERIC;
+BEGIN
+    SELECT COUNT(*) INTO total_tasks
+    FROM tasks
+    WHERE plan_graph_id = plan_graph_id_param;
+
+    IF total_tasks = 0 THEN
+        RETURN 0;
+    END IF;
+
+    SELECT COUNT(*) INTO completed_tasks
+    FROM tasks
+    WHERE plan_graph_id = plan_graph_id_param AND is_completed = true;
+
+    completion_percentage := (completed_tasks::NUMERIC / total_tasks::NUMERIC) * 100;
+
+    RETURN ROUND(completion_percentage, 2);
+END;
+$$ LANGUAGE plpgsql;
+
+-- Function to get tasks by assignment (for specific users)
+CREATE OR REPLACE FUNCTION get_tasks_by_assignment(assigned_user_id VARCHAR)
+RETURNS TABLE(
+    task_id UUID,
+    task_title VARCHAR,
+    plan_title VARCHAR,
+    due_date TIMESTAMP,
+    priority INTEGER,
+    completion_percentage INTEGER,
+    is_completed BOOLEAN
+) AS $$
+BEGIN
+    RETURN QUERY
+    SELECT
+        t.id as task_id,
+        t.title as task_title,
+        p.title as plan_title,
+        t.due_date,
+        t.priority,
+        t.completion_percentage,
+        t.is_completed
+    FROM tasks t
+    JOIN plans p ON t.plan_graph_id = p.graph_id
+    WHERE t.assigned_to @> json_build_array(assigned_user_id)::jsonb
+    ORDER BY
+        CASE WHEN t.due_date IS NULL THEN 1 ELSE 0 END,
+        t.due_date ASC,
+        t.priority ASC;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Create a view for task analytics
+CREATE OR REPLACE VIEW task_analytics AS
+SELECT
+    DATE_TRUNC('week', t.created_at) as week,
+    p.owner_id,
+    COUNT(*) as tasks_created,
+    COUNT(CASE WHEN t.is_completed THEN 1 END) as tasks_completed,
+    AVG(t.completion_percentage) as avg_completion,
+    COUNT(CASE WHEN t.due_date < CURRENT_DATE AND NOT t.is_completed THEN 1 END) as overdue_tasks
+FROM tasks t
+JOIN plans p ON t.plan_graph_id = p.graph_id
+WHERE t.created_at >= CURRENT_DATE - INTERVAL '12 weeks'
+GROUP BY DATE_TRUNC('week', t.created_at), p.owner_id
+ORDER BY week DESC;
+
+-- Create a view for plan statistics
+CREATE OR REPLACE VIEW plan_statistics AS
+SELECT
+    p.id,
+    p.graph_id,
+    p.title,
+    p.owner_id,
+    p.created_at,
+    COUNT(t.id) as total_tasks,
+    COUNT(CASE WHEN t.is_completed THEN 1 END) as completed_tasks,
+    CASE
+        WHEN COUNT(t.id) = 0 THEN 0
+        ELSE ROUND((COUNT(CASE WHEN t.is_completed THEN 1 END)::NUMERIC / COUNT(t.id)::NUMERIC) * 100, 2)
+    END as completion_percentage,
+    COUNT(CASE WHEN t.due_date < CURRENT_DATE AND NOT t.is_completed THEN 1 END) as overdue_tasks,
+    MAX(t.updated_at) as last_task_activity
+FROM plans p
+LEFT JOIN tasks t ON p.graph_id = t.plan_graph_id
+WHERE p.is_archived = false
+GROUP BY p.id, p.graph_id, p.title, p.owner_id, p.created_at;

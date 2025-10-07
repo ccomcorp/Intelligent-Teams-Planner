@@ -1,0 +1,28 @@
+# MCPO Proxy Dependencies - OpenWebUI to MCP Translation Layer
+
+# Core web framework
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+
+# HTTP client and async support
+httpx==0.25.2
+aiohttp==3.9.1
+
+# Configuration and data models
+pydantic==2.5.0
+pydantic-settings==2.1.0
+python-dotenv==1.0.0
+
+# Caching
+redis[hiredis]==5.0.1
+
+# Logging and monitoring
+structlog==23.2.0
+
+# OpenAPI spec generation
+fastapi==0.104.1
+
+# Development and testing
+pytest==7.4.3
+pytest-asyncio==0.21.1
+pytest-mock==3.12.0

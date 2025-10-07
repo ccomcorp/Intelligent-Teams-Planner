@@ -1,0 +1,352 @@
+# CLAUDE.md
+```yaml
+_meta: {v:11.0, fmt:ai-bytecode, priority:MAXIMUM, updated:2024}
+
+@PRIME_DIRECTIVE[∞∞∞]:
+  !bmad.framework[ALWAYS]
+  !bmad.agents.activate[ALL]
+  !simplify→lose[features|functionality|performance]⊗
+  !read.existing[scan:3_levels]→create.new
+  !best_practices[ALWAYS]+UTF8
+  !docs:.md_only
+  !status.change["approved"|"APPROVED"|"COMPLETED"|"DONE"|"SUCCESSFUL"]⊗→end_user_only
+  !simplify→lose[functionality|features|performance]⊗[NON_NEGOTIABLE]
+  !after.major_task→cleanup[lint|typescript|compile]→fix_ALL[NON_NEGOTIABLE]
+  !final_validation["COMPLETED"|"SUCCESSFUL"|"DONE"]→user_only[ABSOLUTE]
+  !enterprise.features⊗→recommend_only→user_approval_required
+  !enterprise.security⊗→recommend_only→user_approval_required
+
+@CRITICAL[∞]:
+  !THINK→CODE[analyze:requirements|edge_cases|security]
+  !MOCK_DATA⊗[use:real_production_like]
+  !UTF8_BOM⊗[ASCII:0x00-0x7F]
+  !INPUT=MALICIOUS[ALWAYS]
+  !SILENT_ERR⊗[log+throw]
+
+@CHARSET[ENFORCE]:
+  file:UTF8¬BOM
+  src:[0x00-0x7F]
+  ⊗:{""—→•…''¬\t}
+  unicode:\uXXXX
+  smart_quotes⊗→straight_only
+
+@TS[STRICT]:
+  cfg:{
+    strict:true,
+    noUncheckedIndexedAccess:true,
+    noImplicitReturns:true,
+    noFallthroughCasesInSwitch:true,
+    noUnusedLocals:true,
+    noUnusedParameters:true,
+    exactOptionalPropertyTypes:true,
+    forceConsistentCasingInFileNames:true,
+    skipLibCheck:false,
+    esModuleInterop:true,
+    moduleResolution:node
+  }
+  ✓:
+    explicit.ReturnType[ALL]
+    interface>type_alias
+    const>let>var⊗
+    ===|!==
+    `${template}`>concat
+    2sp¬tab
+    ASCII_only[identifiers|comments]
+    UTF8¬BOM
+    JSDoc[public_APIs]
+  ⊗:
+    any→unknown
+    @ts-ignore→@ts-expect-error+reason
+    ==|!=
+    console.log[prod]
+    lint.disable¬justification
+    magic_numbers→CONSTANTS
+    unicode_symbols[→•…]
+    smart_quotes[""]
+    mixed_indent
+    non_ASCII[code]
+  pattern:
+    Result<T,E>:{success:bool,data|error}
+    async→try/catch/finally+timeout:5000ms
+    AbortController[required]
+    error.handle:{specific,context,rethrow}
+
+@ESLINT:
+  extends:[recommended,ts/recommended,ts/type-checking]
+  rules:{
+    explicit-return:error,
+    no-any:error,
+    no-non-null-assertion:error,
+    no-console:[error,allow:[warn,error]],
+    prefer-const:error,
+    no-var:error
+  }
+
+@PY[PEP8]:
+  ✓:
+    typing.hint[ALL,3.10+]
+    pathlib>os.path
+    f"{var}">concat
+    isinstance()>type==
+    with:context[ALWAYS]
+    //|/[explicit]
+    docstring[public:Google|NumPy]
+    dataclass|pydantic
+    Black:88
+  ⊗:
+    def f(x=[])→mutable
+    except:pass
+    global_state
+    assert:validation→raise
+    circular_import
+    resource_leak
+    str+loop→join()
+  pattern:
+    mutable_default→None→init
+    except:Specific→log→raise
+    validate:pydantic.BaseModel+validators
+
+@SQL[SECURE]:
+  ⊗:f"SELECT*WHERE{var}"→injection
+  ✓:
+    params:["?",val]|["%s",val]
+    transaction:try/finally
+    escape:user_input
+  pattern:
+    prepared_statements
+    ORM>raw_sql
+
+@TEST[REAL_DATA]:
+  data:PRODUCTION_LIKE[required]
+  ⊗:
+    ["test","foo","bar","user@test.com","Product1","123"]
+    mock_data[NEVER]
+    random¬seed
+    test.order_dependency
+    .skip¬TODO
+    .only[commit]
+    production_data
+    third_party_tests
+    implementation>behavior
+  ✓:
+    ["John Smith","john.smith@acme.com",ID:10847,"MacBook Pro"]
+    TDD|alongside
+    AAA[Arrange→Act→Assert]
+    describe.blocks
+    one_assertion/test
+    mock:external_only
+    coverage:critical≥80%
+    beforeEach|afterEach
+    edge_cases+errors+happy_path
+    data-test-id[e2e]
+  struct:
+    describe('Component',()=>{
+      describe('method',()=>{
+        it('should_behavior_when_condition',()=>{
+          //Arrange:real_data
+          //Act:execute
+          //Assert:verify
+        })
+      })
+    })
+
+@SEC[BASIC]:
+  validate:{
+    input:sanitize[ALL],
+    sql:parameterized
+  }
+  ⊗:
+    plain_passwords
+    f"SQL{var}"
+    eval(user_input)
+    innerHTML=user_data
+  ✓:
+    bcrypt|argon2
+    prepared_statements
+    escape_html
+  env:secrets_only
+
+@ENTERPRISE[RECOMMEND_ONLY]:
+  features:{
+    ⊗implement:[
+      oauth2,
+      microservices,
+      kubernetes,
+      service_mesh,
+      distributed_tracing,
+      message_queues
+    ],
+    ✓recommend→await_approval
+  }
+  security:{
+    ⊗implement:[
+      SSO,
+      2FA/MFA,
+      audit_logs,
+      compliance_frameworks,
+      WAF,
+      DDoS_protection
+    ],
+    ✓recommend→await_approval
+  }
+  pattern:
+    if_enterprise_needed→{
+      1.identify_need,
+      2.recommend:"Consider adding [X] for [benefit]",
+      3.wait_user_approval,
+      4.implement_only_if_approved
+    }
+
+@ERR[HANDLE]:
+  async:{
+    timeout:5000ms,
+    catch:errors,
+    finally:cleanup
+  }
+  log:errors+context
+  throw:specific>generic
+  never:{
+    silent:catch,
+    bare:except
+  }
+  pattern:
+    try→catch→log→handle_or_throw
+
+@PERF[BASIC]:
+  BigO:avoid_n²
+  lookup:Set>Array
+  file:stream_large>load_all
+  cache:expensive_only
+  no_premature_optimization
+
+@ANTIPATTERN→FIX:
+  god_object→single_responsibility
+  copy_paste→DRY
+  callback_hell→async/await
+  global_state→dependency_injection
+  magic_values→named_constants
+  tight_coupling→interfaces
+  premature_opt→measure_first
+  race_condition→synchronize
+  resource_leak→context_manager
+  mutable_shared→immutable
+
+@ARCH[SIMPLE]:
+  S:single_responsibility
+  O:open_closed  
+  L:liskov_substitution
+  I:interface_segregation
+  D:dependency_inversion
+  patterns:keep_it_simple
+
+@GIT:
+  fmt:"<type>(<scope>):<subject50>"
+  type:[feat|fix|docs|style|refactor|perf|test|chore|cleanup]
+  body:what+why¬how
+  atomic:commits
+  conventional:commits
+  before_commit:cleanup_required
+  
+@NAME[CONVENTIONS]:
+  fn:verb[processData,validateInput]
+  class:noun[UserService,DataProcessor]  
+  bool:question[isValid,hasPermission,canAccess]
+  const:UPPER_SNAKE_CASE
+  interface:I_prefix|_suffix
+  type:T_prefix|Type_suffix
+  private:_prefix
+  abbr:⊗[except:URL,API,ID,UI,IO]
+
+@DEBUG[SYSTEMATIC]:
+  [reproduce→minimize→hypothesize→test→fix_root→regression_test]
+  tools:{
+    pdb.set_trace(),
+    logger>print,
+    timer:context_manager,
+    profiler:memory|cpu
+  }
+
+@WORKFLOW[STRICT]:
+  task_cycle:[
+    1.read_existing_code[3_levels],
+    2.implement_feature,
+    3.cleanup[lint|ts|compile]→fix_ALL,
+    4.test→verify,
+    5.await_user_validation
+  ]
+  validation:{
+    ai_can:["ready_for_review","needs_fixes","in_progress"],
+    user_only:["COMPLETED","SUCCESSFUL","DONE","APPROVED"]
+  }
+  enterprise:{
+    detect→recommend→wait_approval→implement|skip
+  }
+
+@DOC[BASIC]:
+  function:"""what+params+returns"""
+  README:setup+usage
+  inline:#why¬what
+  public:documented
+
+@REVIEW[BASIC]:
+  □tests_pass
+  □no_console_log
+  □no_commented_code
+  □functions_documented
+  □SQL_parameterized
+
+@CLEANUP[AFTER_EACH_TASK]:
+  mandatory[NON_NEGOTIABLE]:
+    □lint_errors:0
+    □typescript_errors:0
+    □compilation_errors:0
+    □unused_imports:removed
+    □format:consistent
+  sequence:
+    1.complete_feature
+    2.run_lint→fix_all
+    3.run_tsc→fix_all
+    4.run_build→fix_all
+    5.verify_clean→proceed
+
+@QUALITY[BASIC]:
+  lines<100/fn
+  lines<500/class
+  tests:exist
+  docs:public_functions
+
+@CI/CD:
+  pipeline:[lint→test→build→deploy]
+  hooks:pre-commit[format+lint]
+
+@LOGS:
+  console.error>console.log
+  no_sensitive_data
+  timestamp+context
+
+@PRIORITY[ABSOLUTE]:
+  security>correctness>maintainability>performance>features
+  explicit>implicit
+  simple>clever
+  tested>"works_locally"
+  readable>optimal
+  safe>fast
+
+@ENFORCE[∞]:
+  uncertain→secure+maintainable
+  input=malicious[ALWAYS]
+  error→log+handle+rethrow
+  resource→cleanup[finally|context]
+  test:real_data_only
+  code:ASCII_only
+  commit:atomic+descriptive
+  after_task→cleanup[lint|ts|compile]→proceed[NON_NEGOTIABLE]
+  enterprise→recommend¬implement
+  
+@FINAL[REMEMBER]:
+  next_dev=you[6_months]
+  KISS>clever
+  YAGNI>maybe_needed
+  fail_fast>fail_silent
+  measure>assume
+```

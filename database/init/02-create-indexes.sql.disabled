@@ -1,0 +1,59 @@
+-- Create indexes for optimal query performance
+-- This script runs after tables are created by SQLAlchemy
+
+-- Users table indexes
+CREATE INDEX IF NOT EXISTS idx_users_user_id ON users(user_id);
+CREATE INDEX IF NOT EXISTS idx_users_tenant_id ON users(tenant_id);
+CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
+CREATE INDEX IF NOT EXISTS idx_users_created_at ON users(created_at);
+
+-- Plans table indexes
+CREATE INDEX IF NOT EXISTS idx_plans_graph_id ON plans(graph_id);
+CREATE INDEX IF NOT EXISTS idx_plans_owner_id ON plans(owner_id);
+CREATE INDEX IF NOT EXISTS idx_plans_group_id ON plans(group_id);
+CREATE INDEX IF NOT EXISTS idx_plans_is_archived ON plans(is_archived);
+CREATE INDEX IF NOT EXISTS idx_plans_created_at ON plans(created_at);
+CREATE INDEX IF NOT EXISTS idx_plans_updated_at ON plans(updated_at);
+
+-- Composite index for common queries
+CREATE INDEX IF NOT EXISTS idx_plans_owner_archived ON plans(owner_id, is_archived);
+
+-- Full-text search index for plan titles
+CREATE INDEX IF NOT EXISTS idx_plans_title_gin ON plans USING gin(to_tsvector('english', title));
+CREATE INDEX IF NOT EXISTS idx_plans_description_gin ON plans USING gin(to_tsvector('english', description));
+
+-- Tasks table indexes
+CREATE INDEX IF NOT EXISTS idx_tasks_graph_id ON tasks(graph_id);
+CREATE INDEX IF NOT EXISTS idx_tasks_plan_graph_id ON tasks(plan_graph_id);
+CREATE INDEX IF NOT EXISTS idx_tasks_bucket_id ON tasks(bucket_id);
+CREATE INDEX IF NOT EXISTS idx_tasks_is_completed ON tasks(is_completed);
+CREATE INDEX IF NOT EXISTS idx_tasks_priority ON tasks(priority);
+CREATE INDEX IF NOT EXISTS idx_tasks_due_date ON tasks(due_date);
+CREATE INDEX IF NOT EXISTS idx_tasks_created_at ON tasks(created_at);
+CREATE INDEX IF NOT EXISTS idx_tasks_updated_at ON tasks(updated_at);
+CREATE INDEX IF NOT EXISTS idx_tasks_completion_percentage ON tasks(completion_percentage);
+
+-- Composite indexes for common task queries
+CREATE INDEX IF NOT EXISTS idx_tasks_plan_completed ON tasks(plan_graph_id, is_completed);
+CREATE INDEX IF NOT EXISTS idx_tasks_plan_priority ON tasks(plan_graph_id, priority);
+CREATE INDEX IF NOT EXISTS idx_tasks_due_completed ON tasks(due_date, is_completed);
+
+-- Full-text search index for task titles and descriptions
+CREATE INDEX IF NOT EXISTS idx_tasks_title_gin ON tasks USING gin(to_tsvector('english', title));
+CREATE INDEX IF NOT EXISTS idx_tasks_description_gin ON tasks USING gin(to_tsvector('english', description));
+
+-- GIN index for assigned_to JSON array
+CREATE INDEX IF NOT EXISTS idx_tasks_assigned_to_gin ON tasks USING gin(assigned_to);
+
+-- Token storage table indexes
+CREATE INDEX IF NOT EXISTS idx_token_storage_user_id ON token_storage(user_id);
+CREATE INDEX IF NOT EXISTS idx_token_storage_expires_at ON token_storage(expires_at);
+CREATE INDEX IF NOT EXISTS idx_token_storage_created_at ON token_storage(created_at);
+
+-- Conversation contexts table indexes
+CREATE INDEX IF NOT EXISTS idx_conversation_contexts_conversation_id ON conversation_contexts(conversation_id);
+CREATE INDEX IF NOT EXISTS idx_conversation_contexts_user_id ON conversation_contexts(user_id);
+CREATE INDEX IF NOT EXISTS idx_conversation_contexts_last_activity ON conversation_contexts(last_activity);
+
+-- Composite index for conversation cleanup
+CREATE INDEX IF NOT EXISTS idx_conversation_contexts_user_activity ON conversation_contexts(user_id, last_activity);

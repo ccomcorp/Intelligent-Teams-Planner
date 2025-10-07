@@ -1,0 +1,185 @@
+# OpenWebUI Configuration for Intelligent Teams Planner v2.0
+# Central hub configuration
+
+# Basic settings
+general:
+  app_name: "Intelligent Teams Planner"
+  description: "AI-powered Microsoft Teams Planner management"
+  default_locale: "en-US"
+  enable_signup: false  # Controlled signup
+  enable_login_form: true
+  default_user_role: "user"
+
+# Model configuration
+models:
+  # Primary model for Planner operations
+  - name: "planner-assistant"
+    base_url: "http://mcpo-proxy:8001/v1"
+    api_key: "dummy-key"  # MCPO proxy doesn't require real key
+    description: "Microsoft Planner management assistant"
+    capabilities:
+      - "chat"
+      - "tools"
+    default: true
+    enabled: true
+
+# RAG (Retrieval Augmented Generation) settings
+rag:
+  enabled: true
+  embedding:
+    engine: "openai"
+    model: "text-embedding-3-small"
+    dimensions: 384
+
+  vector_db:
+    provider: "postgresql"
+    connection_string: "postgresql://itp_user:${POSTGRES_PASSWORD}@postgres:5432/intelligent_teams_planner"
+    table_name: "document_embeddings"
+
+  chunk:
+    size: 1000
+    overlap: 100
+
+  retrieval:
+    top_k: 5
+    similarity_threshold: 0.7
+
+# Authentication settings
+auth:
+  provider: "oauth"
+  oauth:
+    providers:
+      - name: "microsoft"
+        client_id: "${MICROSOFT_CLIENT_ID}"
+        client_secret: "${MICROSOFT_CLIENT_SECRET}"
+        authorize_url: "https://login.microsoftonline.com/${MICROSOFT_TENANT_ID}/oauth2/v2.0/authorize"
+        token_url: "https://login.microsoftonline.com/${MICROSOFT_TENANT_ID}/oauth2/v2.0/token"
+        userinfo_url: "https://graph.microsoft.com/v1.0/me"
+        scopes: ["User.Read", "Group.Read.All", "Tasks.ReadWrite"]
+        enabled: true
+
+# UI customization
+ui:
+  theme:
+    primary_color: "#0078D4"  # Microsoft blue
+    secondary_color: "#106EBE"
+    accent_color: "#005A9E"
+
+  branding:
+    logo_url: "/static/images/itp-logo.png"
+    favicon_url: "/static/images/favicon.ico"
+    custom_css: "/static/css/itp-custom.css"
+
+  layout:
+    sidebar_default_open: true
+    show_model_selector: false  # Hide since we have one main model
+    show_temperature_slider: false
+    default_system_prompt: |
+      You are an intelligent Microsoft Planner assistant. You help users manage their Teams Planner tasks and plans through natural language conversation.
+
+      Key capabilities:
+      - Create and manage Planner plans
+      - Add, update, and organize tasks
+      - Search through plans and tasks
+      - Assign tasks to team members
+      - Set due dates and priorities
+
+      Always be helpful, concise, and professional. When users ask for help with Planner operations, use the available tools to perform the requested actions.
+
+# Plugin configuration
+plugins:
+  enabled_plugins:
+    - "planner-tools"
+    - "conversation-memory"
+    - "task-notifications"
+
+  planner_tools:
+    enabled: true
+    proxy_url: "http://mcpo-proxy:8001"
+    auto_authenticate: true
+    show_tool_outputs: true
+
+# API settings
+api:
+  cors:
+    origins:
+      - "http://localhost:3000"
+      - "http://teams-bot:3978"
+    credentials: true
+
+  rate_limiting:
+    enabled: true
+    requests_per_minute: 60
+    burst_size: 10
+
+# Logging and monitoring
+logging:
+  level: "INFO"
+  format: "json"
+  outputs:
+    - "console"
+    - "file:/app/logs/openwebui.log"
+
+# Cache settings
+cache:
+  provider: "redis"
+  redis:
+    url: "redis://:${REDIS_PASSWORD}@redis:6379"
+    key_prefix: "openwebui:"
+    ttl: 3600
+
+# File upload and processing
+files:
+  max_size: "10MB"
+  allowed_types:
+    - "text/plain"
+    - "text/markdown"
+    - "application/pdf"
+    - "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+
+  processors:
+    pdf:
+      extract_images: true
+      chunk_size: 1000
+
+    docx:
+      preserve_formatting: false
+      extract_tables: true
+
+# Security settings
+security:
+  content_security_policy:
+    enabled: true
+    directives:
+      default_src: "'self'"
+      script_src: "'self' 'unsafe-inline'"
+      style_src: "'self' 'unsafe-inline'"
+      img_src: "'self' data: https:"
+
+  session:
+    secure: true
+    httponly: true
+    samesite: "lax"
+    max_age: 86400  # 24 hours
+
+# Integration settings
+integrations:
+  teams_bot:
+    enabled: true
+    webhook_url: "http://teams-bot:3978/api/messages"
+    shared_secret: "${TEAMS_BOT_SECRET}"
+
+  graph_api:
+    base_url: "https://graph.microsoft.com/v1.0"
+    proxy_through_mcp: true
+    rate_limit_requests: 100
+    rate_limit_window: 60
+
+# Feature flags
+features:
+  enable_planner_integration: true
+  enable_conversation_persistence: true
+  enable_task_notifications: true
+  enable_semantic_search: true
+  enable_batch_operations: true
+  enable_analytics: false  # Disable for MVP
