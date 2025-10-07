@@ -376,3 +376,66 @@ class GraphAPIClient:
         )
 
         return result.get("value", []) if result else []
+
+    # Task Comment Operations
+    async def get_task_comments(self, task_id: str, user_id: str) -> List[Dict[str, Any]]:
+        """Get comments for a task"""
+        result = await self._make_request("GET", f"/planner/tasks/{task_id}/details", user_id)
+        if result and "checklist" in result:
+            # Planner stores comments in task details/checklist format
+            checklist = result.get("checklist", {})
+            comments = []
+            for item_id, item in checklist.items():
+                if item.get("title"):
+                    comments.append({
+                        "id": item_id,
+                        "text": item["title"],
+                        "createdDateTime": item.get("lastModifiedDateTime"),
+                        "isChecked": item.get("isChecked", False)
+                    })
+            return comments
+        return []
+
+    async def add_task_comment(self, task_id: str, comment_text: str, user_id: str) -> Optional[Dict[str, Any]]:
+        """Add a comment to a task (via task details checklist)"""
+        # First get current task details to get ETag
+        current_details = await self._make_request("GET", f"/planner/tasks/{task_id}/details", user_id)
+        if not current_details:
+            raise GraphAPIError("Could not get task details for comment addition")
+
+        # Generate unique ID for the comment
+        import uuid
+        comment_id = str(uuid.uuid4())
+
+        # Get existing checklist or create new one
+        checklist = current_details.get("checklist", {})
+
+        # Add new comment as checklist item
+        checklist[comment_id] = {
+            "@odata.type": "#microsoft.graph.plannerChecklistItem",
+            "title": comment_text,
+            "isChecked": False,
+            "orderHint": " !"
+        }
+
+        # Update task details with new comment
+        update_data = {
+            "checklist": checklist,
+            "etag": current_details.get("@odata.etag")
+        }
+
+        result = await self._make_request(
+            "PATCH",
+            f"/planner/tasks/{task_id}/details",
+            user_id,
+            data=update_data,
+            use_cache=False
+        )
+
+        if result:
+            return {
+                "id": comment_id,
+                "text": comment_text,
+                "createdDateTime": datetime.utcnow().isoformat() + "Z"
+            }
+        return None
