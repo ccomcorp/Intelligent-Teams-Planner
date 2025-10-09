@@ -56,7 +56,7 @@ class NLErrorHandler:
                     r"403"
                 ],
                 "responses": [
-                    "I'm having trouble accessing your Microsoft Planner account. Let's get you reconnected.",
+                    "I'm having trouble accessing your Microsoft Planner account due to authentication issues. Let's get you reconnected.",
                     "It looks like your authentication has expired. You'll need to sign in again.",
                     "I don't have permission to access your planner. Please check your account permissions."
                 ],
@@ -80,7 +80,7 @@ class NLErrorHandler:
                     r"504"
                 ],
                 "responses": [
-                    "I'm having trouble connecting to Microsoft Planner right now.",
+                    "I'm having trouble with the network connection to Microsoft Planner right now.",
                     "There seems to be a network issue. The service might be temporarily unavailable.",
                     "I couldn't reach the Planner service. This might be a temporary connectivity issue."
                 ],

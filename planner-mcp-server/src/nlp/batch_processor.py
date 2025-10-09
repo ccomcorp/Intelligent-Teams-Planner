@@ -7,7 +7,7 @@ import re
 import asyncio
 from typing import Dict, List, Any, Optional, AsyncGenerator
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import structlog
 
 logger = structlog.get_logger(__name__)
@@ -68,7 +68,7 @@ class BatchProcessor:
             r'(?:mark|set)\s+(?:all\s+)?(?:completed|done|finished)\s+(?:tasks?|items?)\s+(?:as|to)\s+(.+?)(?:\s|$)': 'mark_tasks_status',
 
             # Assign multiple tasks
-            r'(?:assign|give|delegate)\s+(?:all\s+)?(?:tasks?|items?)\s+(?:from|for|in)\s+(.+?)\s+(?:to)\s+(.+?)(?:\s|$)': 'assign_tasks_in_project',
+            r'(?:assign|give|delegate)\s+(?:all\s+)?(?:tasks?|items?)\s+(?:(?:from|for|in)\s+(.+?)\s+)?(?:to)\s+(.+?)(?:\s|$)': 'assign_tasks_in_project',
         }
 
     async def detect_batch_operation(self, user_input: str, entities: Dict[str, Any]) -> Optional[Dict[str, Any]]:

@@ -34,6 +34,15 @@ class DateParsingResult:
     metadata: Dict[str, any]
 
 
+@dataclass
+class SingleDateResult:
+    """Result of single date parsing for integration tests"""
+    success: bool
+    parsed_date: Optional[datetime] = None
+    confidence: float = 0.0
+    original_text: str = ""
+
+
 class DateParser:
     """
     Natural language date parser with support for relative expressions
@@ -47,7 +56,7 @@ class DateParser:
         self.working_days = [0, 1, 2, 3, 4]  # Monday-Friday
 
         # Define relative date patterns and their handlers
-        self.relative_patterns = {
+        self._relative_pattern_handlers = {
             # Today/Tomorrow/Yesterday
             r'\b(today)\b': self._parse_today,
             r'\b(tomorrow)\b': self._parse_tomorrow,
@@ -81,13 +90,34 @@ class DateParser:
             r'\b(this|next|last)\s+month\b': self._parse_month_range,
         }
 
+        # Create pattern dictionaries for testing access
+        self.relative_patterns = {
+            'today': r'\b(today)\b',
+            'tomorrow': r'\b(tomorrow)\b',
+            'yesterday': r'\b(yesterday)\b',
+            'period_relative': r'\b(this|next|last)\s+(week|month|year|quarter)\b',
+            'weekday_relative': r'\b(this|next|last)\s+(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b',
+            'in_duration': r'\bin\s+(\d+)\s+(day|days|week|weeks|month|months|year|years)\b',
+            'in_duration_article': r'\bin\s+a\s+(day|week|month|year)\b',
+            'duration_ago': r'\b(\d+)\s+(day|days|week|weeks|month|months|year|years)\s+ago\b',
+            'duration_ago_article': r'\ba\s+(day|week|month|year)\s+ago\b',
+            'period_boundary': r'\b(end|beginning|start)\s+of\s+(this|next|last)\s+(week|month|year|quarter)\b',
+            'period_boundary_current': r'\b(end|beginning|start)\s+of\s+(week|month|year|quarter)\b',
+            'business_day': r'\b(next|last)\s+business\s+day\b',
+            'working_day': r'\b(next|last)\s+working\s+day\b',
+            'week_day': r'\b(this|next|last)\s+week\s+(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b',
+            'week_range': r'\b(this|next|last)\s+week\b',
+            'month_range': r'\b(this|next|last)\s+month\b',
+        }
+
         # Absolute date patterns
-        self.absolute_patterns = [
-            r'\b(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})\b',  # MM/DD/YYYY or DD/MM/YYYY
-            r'\b(\d{4})[\/\-](\d{1,2})[\/\-](\d{1,2})\b',    # YYYY/MM/DD
-            r'\b(january|february|march|april|may|june|july|august|september|october|november|december)\s+(\d{1,2})(?:,?\s+(\d{4}))?\b',
-            r'\b(\d{1,2})\s+(january|february|march|april|may|june|july|august|september|october|november|december)(?:\s+(\d{4}))?\b',
-        ]
+        self.absolute_patterns = {
+            'numeric_slash': r'\b(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})\b',  # MM/DD/YYYY or DD/MM/YYYY
+            'iso_format': r'\b(\d{4})[\/\-](\d{1,2})[\/\-](\d{1,2})\b',    # YYYY/MM/DD
+            'month_day_year': r'\b(january|february|march|april|may|june|july|august|september|october|november|december)\s+(\d{1,2})(?:,?\s+(\d{4}))?\b',
+            'day_month_year': r'\b(\d{1,2})\s+(january|february|march|april|may|june|july|august|september|october|november|december)(?:\s+(\d{4}))?\b',
+            'abbrev_month_day': r'\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\s+(\d{1,2})(?:,?\s+(\d{4}))?\b',
+        }
 
         # Day name mappings
         self.day_names = {
@@ -100,6 +130,48 @@ class DateParser:
             'january': 1, 'february': 2, 'march': 3, 'april': 4, 'may': 5, 'june': 6,
             'july': 7, 'august': 8, 'september': 9, 'october': 10, 'november': 11, 'december': 12
         }
+
+    async def initialize(self):
+        """Initialize the date parser (no async operations needed for this component)"""
+        logger.debug("DateParser initialized successfully")
+        return
+
+    async def parse_date(self, text: str, reference_date: Optional[datetime] = None) -> SingleDateResult:
+        """
+        Parse a single date from text for integration testing
+
+        Args:
+            text: Text containing a date expression
+            reference_date: Reference date for relative expressions
+
+        Returns:
+            SingleDateResult with success, parsed_date, and confidence
+        """
+        try:
+            result = await self.parse_dates(text, reference_date)
+
+            if result.parsed_dates and len(result.parsed_dates) > 0:
+                first_date = result.parsed_dates[0]
+                return SingleDateResult(
+                    success=True,
+                    parsed_date=first_date.date,
+                    confidence=first_date.confidence,
+                    original_text=first_date.original_text
+                )
+            else:
+                return SingleDateResult(
+                    success=False,
+                    confidence=0.0,
+                    original_text=text
+                )
+
+        except Exception as e:
+            logger.error("Error in parse_date", error=str(e), text=text)
+            return SingleDateResult(
+                success=False,
+                confidence=0.0,
+                original_text=text
+            )
 
     async def parse_dates(self, text: str, reference_date: Optional[datetime] = None) -> DateParsingResult:
         """
@@ -171,7 +243,7 @@ class DateParser:
         parsed_dates = []
         remaining_text = text
 
-        for pattern, handler in self.relative_patterns.items():
+        for pattern, handler in self._relative_pattern_handlers.items():
             matches = list(re.finditer(pattern, text, re.IGNORECASE))
             for match in matches:
                 try:
@@ -190,7 +262,7 @@ class DateParser:
         parsed_dates = []
         remaining_text = text
 
-        for pattern in self.absolute_patterns:
+        for pattern_name, pattern in self.absolute_patterns.items():
             matches = list(re.finditer(pattern, text, re.IGNORECASE))
             for match in matches:
                 try:
@@ -653,3 +725,35 @@ class DateParser:
         while date.weekday() not in self.working_days:
             date += timedelta(days=1)
         return date
+
+    def _adjust_to_business_hours(self, date: datetime) -> datetime:
+        """Adjust date to business hours"""
+        # If it's outside business hours, move to next business day start
+        if date.hour < self.business_hours_start or date.hour >= self.business_hours_end:
+            date = date.replace(hour=self.business_hours_start, minute=0, second=0, microsecond=0)
+
+        # If it's weekend, move to next business day
+        if date.weekday() not in self.working_days:
+            while date.weekday() not in self.working_days:
+                date += timedelta(days=1)
+            date = date.replace(hour=self.business_hours_start, minute=0, second=0, microsecond=0)
+
+        return date
+
+    def _get_next_weekday(self, reference_date: datetime, target_weekday: int) -> datetime:
+        """Get the next occurrence of a specific weekday (0=Monday, 6=Sunday)"""
+        current_weekday = reference_date.weekday()
+        days_ahead = (target_weekday - current_weekday) % 7
+        if days_ahead == 0:  # If it's the same day, go to next week
+            days_ahead = 7
+        target_date = reference_date + timedelta(days=days_ahead)
+        # Preserve the original time to maintain the expected day difference
+        return target_date.replace(hour=reference_date.hour, minute=reference_date.minute, second=reference_date.second, microsecond=reference_date.microsecond)
+
+    def _add_weeks(self, reference_date: datetime, weeks: int) -> datetime:
+        """Add weeks to a date"""
+        return reference_date + timedelta(weeks=weeks)
+
+
+# Alias for compatibility with tests
+NaturalLanguageDateParser = DateParser

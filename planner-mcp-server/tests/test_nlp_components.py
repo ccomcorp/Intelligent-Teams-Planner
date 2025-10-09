@@ -64,19 +64,15 @@ class TestIntentClassifierUnit:
                 assert field in definition, f"Intent {intent} missing {field}"
                 assert isinstance(definition[field], list) or isinstance(definition[field], str)
 
-    def test_fallback_intent_handling(self, classifier):
+    @pytest.mark.asyncio
+    async def test_fallback_intent_handling(self, classifier):
         """Test handling of unrecognized inputs"""
-        # This would normally require the full model, so we mock it
-        with patch.object(classifier, 'classify_intent') as mock_classify:
-            mock_classify.return_value = Mock(
-                intent="unknown",
-                confidence=0.0,
-                metadata={"fallback": True}
-            )
+        # Test real fallback functionality without mocks
+        result = await classifier.classify_intent("xyzabc random gibberish")
 
-            result = classifier.classify_intent("xyzabc random gibberish")
-            assert result.intent == "unknown"
-            assert result.confidence == 0.0
+        # Should return help intent as fallback with low confidence
+        assert result.intent == "help"
+        assert result.confidence <= 0.2  # Low confidence for unrecognized input
 
 
 class TestEntityExtractorUnit:
@@ -594,7 +590,8 @@ class TestNLPPerformance:
         # Should not create excessive objects
         assert object_increase < 1000  # Reasonable object creation limit
 
-    def test_concurrent_processing(self):
+    @pytest.mark.asyncio
+    async def test_concurrent_processing(self):
         """Test handling of concurrent requests"""
         # Simulate concurrent processing
         tasks = []
@@ -602,6 +599,9 @@ class TestNLPPerformance:
             # Would normally be async NLP processing
             task = asyncio.create_task(asyncio.sleep(0.01))
             tasks.append(task)
+
+        # Wait for all tasks to complete
+        await asyncio.gather(*tasks)
 
         # All tasks should be created successfully
         assert len(tasks) == 10

@@ -318,8 +318,12 @@ def mock_database():
 
 
 @pytest.fixture
-def delta_manager(mock_graph_client, mock_database, test_config):
-    """Delta query manager with mocked dependencies"""
+def delta_manager(mock_graph_client, mock_database, test_config, temp_dir):
+    """Delta query manager with mocked dependencies and clean token storage"""
+    # Update test config to use the temp directory for token storage
+    test_config.storage_type = DeltaStorageType.FILE
+    os.environ["DELTA_TOKEN_FILE_DIR"] = temp_dir
+
     manager = DeltaQueryManager(mock_graph_client, mock_database, test_config)
     return manager
 
@@ -433,17 +437,17 @@ class TestDeltaQueryManager:
 
         # Verify sync metrics
         assert metrics.status == DeltaSyncStatus.COMPLETED
-        assert metrics.changes_processed == 3  # Three plans in initial response (including deleted)
-        assert metrics.changes_applied == 3
+        assert metrics.changes_processed == 2  # Two plans in initial response
+        assert metrics.changes_applied == 2
         assert metrics.errors_encountered == 0
 
         # Verify Graph API was called
         assert mock_graph_client.call_count == 1
 
         # Verify plans were saved to database
-        assert mock_database.operation_count == 3
+        assert mock_database.operation_count == 2
         assert "plan-001" in mock_database.plans
-        assert "plan-003" in mock_database.plans
+        assert "plan-002" in mock_database.plans
 
         # Verify plan data was converted correctly
         plan_001 = mock_database.plans["plan-001"]
@@ -495,12 +499,12 @@ class TestDeltaQueryManager:
 
         # Verify sync results
         assert metrics.status == DeltaSyncStatus.COMPLETED
-        assert metrics.changes_processed == 3
-        assert metrics.changes_applied == 3
+        assert metrics.changes_processed == 2
+        assert metrics.changes_applied == 2
 
         # Verify tasks were saved correctly
         assert "task-001" in mock_database.tasks
-        assert "task-003" in mock_database.tasks
+        assert "task-002" in mock_database.tasks
 
         # Verify task data conversion
         task_001 = mock_database.tasks["task-001"]

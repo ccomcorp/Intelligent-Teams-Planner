@@ -9,22 +9,34 @@ RUN apt-get update && apt-get install -y \
     gcc \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy requirements first for better caching
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# Install Poetry
+RUN pip install poetry==1.8.2
+
+# Configure Poetry: Don't create a virtual environment, install dependencies globally
+ENV POETRY_NO_INTERACTION=1 \
+    POETRY_VENV_IN_PROJECT=1 \
+    POETRY_CACHE_DIR=/tmp/poetry_cache
+
+# Copy Poetry files first for better caching
+COPY pyproject.toml poetry.lock* ./
+
+# Install dependencies using Poetry
+RUN poetry install --only=main && rm -rf $POETRY_CACHE_DIR
 
 # Copy application code
 COPY src/ ./src/
-COPY config/ ./config/
+COPY README.md ./
 
 # Create non-root user
-RUN useradd -m -u 1000 mcpuser && chown -R mcpuser:mcpuser /app
-USER mcpuser
+RUN useradd --create-home --shell /bin/bash app && chown -R app:app /app
+USER app
+
+# Expose port
+EXPOSE 7100
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD curl -f http://localhost:8000/health || exit 1
+    CMD curl -f http://localhost:7100/health || exit 1
 
-EXPOSE 8000
-
-CMD ["python", "-m", "src.main"]
+# Run the application
+CMD ["poetry", "run", "python", "-m", "src.main"]

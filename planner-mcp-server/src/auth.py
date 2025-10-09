@@ -33,10 +33,13 @@ class AuthService:
         client_secret: str,
         tenant_id: str,
         cache_service: CacheService,
-        redirect_uri: str = None
+        redirect_uri: str = None,
+        testing_mode: bool = False
     ):
-        if not all([client_id, client_secret, tenant_id]):
+        if not testing_mode and not all([client_id, client_secret, tenant_id]):
             raise ValueError("client_id, client_secret, and tenant_id are required")
+
+        self.testing_mode = testing_mode
 
         self.client_id = client_id
         self.client_secret = client_secret
@@ -81,13 +84,18 @@ class AuthService:
         key = base64.urlsafe_b64encode(kdf.derive(encryption_key.encode()))
         self.cipher = Fernet(key)
 
-        # MSAL app configuration
-        self.authority = f"https://login.microsoftonline.com/{tenant_id}"
-        self.app = msal.ConfidentialClientApplication(
-            client_id=client_id,
-            client_credential=client_secret,
-            authority=self.authority
-        )
+        # MSAL app configuration (skip in testing mode)
+        if not self.testing_mode:
+            self.authority = f"https://login.microsoftonline.com/{tenant_id}"
+            self.app = msal.ConfidentialClientApplication(
+                client_id=client_id,
+                client_credential=client_secret,
+                authority=self.authority
+            )
+        else:
+            self.authority = None
+            self.app = None
+            logger.warning("Auth service running in testing mode - Microsoft Graph API calls will be mocked")
 
     async def get_login_url(self, user_id: str, state: str = None) -> str:
         """Generate OAuth login URL"""

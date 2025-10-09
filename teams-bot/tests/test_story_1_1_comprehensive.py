@@ -46,9 +46,19 @@ class TestAcceptanceCriteria:
         return client
 
     @pytest.fixture
-    def teams_bot(self, mock_openwebui_client, context_manager):
+    def mock_attachment_handler(self):
+        """Mock attachment handler"""
+        from src.attachment_handler import TeamsAttachmentHandler
+        handler = Mock(spec=TeamsAttachmentHandler)
+        handler.process_attachments = AsyncMock()
+        handler.format_attachment_response = Mock(return_value="")
+        handler.close = AsyncMock()
+        return handler
+
+    @pytest.fixture
+    def teams_bot(self, mock_openwebui_client, context_manager, mock_attachment_handler):
         """TeamsBot instance with mocked dependencies"""
-        return TeamsBot(mock_openwebui_client, context_manager)
+        return TeamsBot(mock_openwebui_client, context_manager, mock_attachment_handler)
 
     @pytest.fixture
     def mock_turn_context_basic(self):

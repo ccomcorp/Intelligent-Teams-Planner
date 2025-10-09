@@ -549,7 +549,7 @@ def main():
     """Main entry point"""
     try:
         host = os.getenv("HOST", "0.0.0.0")
-        port = int(os.getenv("PORT", "8001"))
+        port = int(os.getenv("PORT", "7105"))
 
         logger.info("Starting MCPO Proxy", host=host, port=port)
 

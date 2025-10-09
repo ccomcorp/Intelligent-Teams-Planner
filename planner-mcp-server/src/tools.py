@@ -2,10 +2,9 @@
 MCP Tools Registry for Microsoft Planner operations
 """
 
-import os
-from typing import List, Dict, Any, Optional, Callable, Awaitable
+from typing import List, Dict, Any, Optional
 from datetime import datetime
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass
 from abc import ABC, abstractmethod
 
 import structlog
@@ -13,6 +12,13 @@ import structlog
 from .graph_client import GraphAPIClient, GraphAPIError
 from .database import Database
 from .cache import CacheService
+from .nlp import (
+    IntentClassifier,
+    EntityExtractor,
+    DateParser,
+    ConversationContextManager,
+    BatchProcessor
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -1340,6 +1346,199 @@ class SearchPlans(Tool):
             logger.error("Error searching plans", error=str(e))
             return ToolResult(success=False, error=f"Failed to search plans: {str(e)}")
 
+
+class ProcessNaturalLanguage(Tool):
+    """Process natural language commands and route to appropriate tools"""
+
+    def __init__(self, graph_client: GraphAPIClient, database: Database, nlp_components: Dict[str, Any]):
+        super().__init__(
+            "process_natural_language",
+            "Process natural language commands and convert them to structured actions"
+        )
+        self.graph_client = graph_client
+        self.database = database
+        self.nlp_components = nlp_components
+
+    def _define_parameters(self) -> Dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "user_input": {
+                    "type": "string",
+                    "description": "Natural language input from the user"
+                },
+                "session_id": {
+                    "type": "string",
+                    "description": "Session identifier for conversation context",
+                    "default": "default"
+                },
+                "user_id": {
+                    "type": "string",
+                    "description": "User identifier",
+                    "default": "default"
+                }
+            },
+            "required": ["user_input"]
+        }
+
+    async def execute(self, arguments: Dict[str, Any], context: Dict[str, Any]) -> ToolResult:
+        """Process natural language input and route to appropriate action"""
+        try:
+            user_input = arguments["user_input"]
+            session_id = arguments.get("session_id", "default")
+            user_id = context.get("user_id", "default")
+
+            # Extract conversation context
+            conversation_context = await self.nlp_components["context_manager"].get_conversation_context(
+                user_id, session_id
+            )
+
+            # Classify intent
+            intent_result = await self.nlp_components["intent_classifier"].classify_intent(
+                user_input, conversation_context
+            )
+
+            # Extract entities
+            entities = await self.nlp_components["entity_extractor"].extract_entities(
+                user_input, conversation_context
+            )
+
+            # Parse dates if present
+            parsed_dates = await self.nlp_components["date_parser"].parse_dates(user_input)
+            if parsed_dates:
+                entities.update(parsed_dates)
+
+            # Check for batch operations
+            batch_operation = await self.nlp_components["batch_processor"].detect_batch_operation(
+                user_input, entities
+            )
+
+            # Update conversation context
+            await self.nlp_components["context_manager"].update_context(
+                user_id, session_id, {
+                    "last_input": user_input,
+                    "last_intent": intent_result,
+                    "last_entities": entities,
+                    "timestamp": datetime.utcnow().isoformat()
+                }
+            )
+
+            result = {
+                "intent": intent_result,
+                "entities": entities,
+                "batch_operation": batch_operation,
+                "conversation_context": conversation_context,
+                "suggested_actions": self._generate_action_suggestions(intent_result, entities, batch_operation),
+                "confidence": intent_result.get("confidence", 0.0)
+            }
+
+            logger.info("Natural language processing completed",
+                        user_id=user_id,
+                        intent=intent_result.get("intent"),
+                        entities_count=len(entities),
+                        is_batch=batch_operation is not None)
+
+            return ToolResult(
+                success=True,
+                content=result,
+                metadata={
+                    "processing_time": datetime.utcnow().isoformat(),
+                    "nlp_version": "1.0",
+                    "user_id": user_id,
+                    "session_id": session_id
+                }
+            )
+
+        except Exception as e:
+            logger.error("Error processing natural language", error=str(e), user_input=user_input[:100])
+            return ToolResult(success=False, error=f"Failed to process natural language: {str(e)}")
+
+    def _generate_action_suggestions(self, intent_result: Dict[str, Any], entities: Dict[str, Any],
+                                   batch_operation: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Generate suggested actions based on NLP analysis"""
+        suggestions = []
+
+        intent = intent_result.get("intent", "unknown")
+
+        try:
+            if intent == "create_plan":
+                suggestions.append({
+                    "tool": "create_plan",
+                    "parameters": {
+                        "title": entities.get("PLAN_NAME", "New Plan"),
+                        "description": entities.get("DESCRIPTION", ""),
+                        "owner": entities.get("PERSON", "")
+                    },
+                    "confidence": intent_result.get("confidence", 0.0)
+                })
+
+            elif intent == "create_task":
+                task_params = {
+                    "title": entities.get("TASK_NAME", "New Task"),
+                    "description": entities.get("DESCRIPTION", ""),
+                    "plan_id": entities.get("PLAN_ID", "")
+                }
+
+                # Add date information if available
+                if "DUE_DATE" in entities:
+                    task_params["due_date"] = entities["DUE_DATE"]
+
+                if "PRIORITY" in entities:
+                    task_params["priority"] = entities["PRIORITY"]
+
+                if "PERSON" in entities:
+                    task_params["assignee"] = entities["PERSON"]
+
+                suggestions.append({
+                    "tool": "create_task",
+                    "parameters": task_params,
+                    "confidence": intent_result.get("confidence", 0.0)
+                })
+
+            elif intent == "list_tasks":
+                list_params = {}
+                if "PLAN_ID" in entities:
+                    list_params["plan_id"] = entities["PLAN_ID"]
+                if "PERSON" in entities:
+                    list_params["assignee"] = entities["PERSON"]
+
+                suggestions.append({
+                    "tool": "list_tasks",
+                    "parameters": list_params,
+                    "confidence": intent_result.get("confidence", 0.0)
+                })
+
+            elif intent == "search":
+                search_params = {
+                    "query": entities.get("SEARCH_TERM", ""),
+                    "include_completed": entities.get("INCLUDE_COMPLETED", True)
+                }
+
+                suggestions.append({
+                    "tool": "search_tasks",
+                    "parameters": search_params,
+                    "confidence": intent_result.get("confidence", 0.0)
+                })
+
+            # Handle batch operations
+            if batch_operation and batch_operation.get("is_batch"):
+                suggestions.append({
+                    "tool": "execute_batch_operation",
+                    "parameters": {
+                        "operation_type": batch_operation.get("operation_type"),
+                        "batch_parameters": batch_operation
+                    },
+                    "confidence": 0.8,
+                    "is_batch": True
+                })
+
+            return suggestions
+
+        except Exception as e:
+            logger.error("Error generating action suggestions", error=str(e))
+            return []
+
+
 class ToolRegistry:
     """Registry and manager for MCP tools"""
 
@@ -1353,6 +1552,13 @@ class ToolRegistry:
         self.database = database
         self.cache_service = cache_service
         self.tools: Dict[str, Tool] = {}
+
+        # Initialize NLP components
+        self.intent_classifier = IntentClassifier()
+        self.entity_extractor = EntityExtractor()
+        self.date_parser = DateParser()
+        self.context_manager = ConversationContextManager(database=database)
+        self.batch_processor = BatchProcessor()
 
     async def initialize(self):
         """Initialize all tools"""
@@ -1379,6 +1585,18 @@ class ToolRegistry:
 
             # Register search tools
             self.tools["search_plans"] = SearchPlans(self.graph_client, self.database)
+
+            # Register NLP processing tool (Story 1.3)
+            nlp_components = {
+                "intent_classifier": self.intent_classifier,
+                "entity_extractor": self.entity_extractor,
+                "date_parser": self.date_parser,
+                "context_manager": self.context_manager,
+                "batch_processor": self.batch_processor
+            }
+            self.tools["process_natural_language"] = ProcessNaturalLanguage(
+                self.graph_client, self.database, nlp_components
+            )
 
             logger.info("Tool registry initialized", tool_count=len(self.tools))
 

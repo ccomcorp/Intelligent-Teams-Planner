@@ -12,22 +12,31 @@ from aiohttp import web
 from aiohttp.web import Request, Response, json_response
 from botbuilder.core import ActivityHandler, TurnContext, MessageFactory
 from botbuilder.core.integration import aiohttp_error_middleware
-from botbuilder.integration.aiohttp import CloudAdapter, ConfigurationBotFrameworkAuthentication
-from botbuilder.schema import Activity, ActivityTypes, ChannelAccount
+from botbuilder.integration.aiohttp import (
+    CloudAdapter,
+    ConfigurationBotFrameworkAuthentication,
+)
+from botbuilder.schema import Activity, ActivityTypes
 import structlog
 import httpx
 import redis.asyncio as redis
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
+
+try:
+    from .attachment_handler import TeamsAttachmentHandler
+except ImportError:
+    from attachment_handler import TeamsAttachmentHandler
 
 # Configure structured logging
 structlog.configure(
     processors=[structlog.dev.ConsoleRenderer()],
     wrapper_class=structlog.make_filtering_bound_logger(20),
     logger_factory=structlog.PrintLoggerFactory(),
-    cache_logger_on_first_use=True
+    cache_logger_on_first_use=True,
 )
 
 logger = structlog.get_logger(__name__)
+
 
 class ConversationContextManager:
     """Redis-based conversation context management"""
@@ -56,7 +65,9 @@ class ConversationContextManager:
         """Generate Redis key for conversation context"""
         return f"teams:conversation:{channel_id}:{user_id}"
 
-    async def get_context(self, channel_id: str, user_id: str) -> Optional[Dict[str, Any]]:
+    async def get_context(
+        self, channel_id: str, user_id: str
+    ) -> Optional[Dict[str, Any]]:
         """Retrieve conversation context from Redis"""
         if not self.redis_client:
             return None
@@ -71,11 +82,23 @@ class ConversationContextManager:
                 await self.redis_client.setex(key, self.ttl, json.dumps(context))
                 return context
         except Exception as e:
-            logger.error("Error retrieving conversation context", error=str(e), channel_id=channel_id, user_id=user_id)
+            logger.error(
+                "Error retrieving conversation context",
+                error=str(e),
+                channel_id=channel_id,
+                user_id=user_id,
+            )
 
         return None
 
-    async def update_context(self, channel_id: str, user_id: str, openwebui_conversation_id: str, message: str, response: str):
+    async def update_context(
+        self,
+        channel_id: str,
+        user_id: str,
+        openwebui_conversation_id: str,
+        message: str,
+        response: str,
+    ) -> None:
         """Update conversation context in Redis"""
         if not self.redis_client:
             return
@@ -90,7 +113,7 @@ class ConversationContextManager:
             else:
                 context = {
                     "created_at": datetime.now(timezone.utc).isoformat(),
-                    "messages": []
+                    "messages": [],
                 }
 
             # Update context
@@ -98,11 +121,13 @@ class ConversationContextManager:
             context["last_activity"] = datetime.now(timezone.utc).isoformat()
 
             # Add message to history (keep last 10 messages as per story spec)
-            context["messages"].append({
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-                "user_message": message,
-                "bot_response": response
-            })
+            context["messages"].append(
+                {
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "user_message": message,
+                    "bot_response": response,
+                }
+            )
 
             # Keep only last 10 messages
             max_messages = int(os.getenv("MAX_CONTEXT_MESSAGES", "10"))
@@ -113,9 +138,14 @@ class ConversationContextManager:
             await self.redis_client.setex(key, self.ttl, json.dumps(context))
 
         except Exception as e:
-            logger.error("Error updating conversation context", error=str(e), channel_id=channel_id, user_id=user_id)
+            logger.error(
+                "Error updating conversation context",
+                error=str(e),
+                channel_id=channel_id,
+                user_id=user_id,
+            )
 
-    async def clear_context(self, channel_id: str, user_id: str):
+    async def clear_context(self, channel_id: str, user_id: str) -> None:
         """Clear conversation context for user"""
         if not self.redis_client:
             return
@@ -123,23 +153,39 @@ class ConversationContextManager:
         try:
             key = self._get_key(channel_id, user_id)
             await self.redis_client.delete(key)
-            logger.info("Cleared conversation context", channel_id=channel_id, user_id=user_id)
+            logger.info(
+                "Cleared conversation context", channel_id=channel_id, user_id=user_id
+            )
         except Exception as e:
-            logger.error("Error clearing conversation context", error=str(e), channel_id=channel_id, user_id=user_id)
+            logger.error(
+                "Error clearing conversation context",
+                error=str(e),
+                channel_id=channel_id,
+                user_id=user_id,
+            )
+
 
 class OpenWebUIClient:
     """Client for communicating with OpenWebUI"""
 
     def __init__(self, base_url: str, api_key: str):
-        self.base_url = base_url.rstrip('/')
+        self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.client = httpx.AsyncClient(timeout=30.0)
 
-    async def send_message(self, message_content: Dict[str, Any], user_id: str, conversation_id: str = None, auth_token: str = None) -> Dict[str, Any]:
+    async def send_message(
+        self,
+        message_content: Dict[str, Any],
+        user_id: str,
+        conversation_id: Optional[str] = None,
+        auth_token: Optional[str] = None,
+    ) -> Dict[str, Any]:
         """Send message to OpenWebUI and get response"""
         try:
             # Use formatted text that preserves mentions and attachments
-            message_text = message_content.get("formatted_text", message_content.get("text", ""))
+            message_text = message_content.get(
+                "formatted_text", message_content.get("text", "")
+            )
 
             # Create rich message content for OpenWebUI
             content = message_text
@@ -162,24 +208,19 @@ class OpenWebUIClient:
             # Format message for OpenWebUI chat completion
             payload = {
                 "model": "planner-assistant",
-                "messages": [
-                    {
-                        "role": "user",
-                        "content": content
-                    }
-                ],
+                "messages": [{"role": "user", "content": content}],
                 "user": user_id,
                 "conversation_id": conversation_id,
                 "stream": False,
                 "metadata": {
                     "teams_mentions": message_content.get("mentions", []),
-                    "teams_attachments": message_content.get("attachments", [])
-                }
+                    "teams_attachments": message_content.get("attachments", []),
+                },
             }
 
             headers = {
                 "Authorization": f"Bearer {self.api_key}",
-                "Content-Type": "application/json"
+                "Content-Type": "application/json",
             }
 
             # Forward Teams authentication token if available
@@ -188,78 +229,99 @@ class OpenWebUIClient:
                 logger.debug("Forwarding Teams authentication token to OpenWebUI")
 
             response = await self.client.post(
-                f"{self.base_url}/api/chat/completions",
-                json=payload,
-                headers=headers
+                f"{self.base_url}/api/chat/completions", json=payload, headers=headers
             )
 
             if response.status_code == 200:
                 data = response.json()
                 return {
                     "success": True,
-                    "content": data.get("choices", [{}])[0].get("message", {}).get("content", "Sorry, I couldn't process that request."),
-                    "conversation_id": data.get("conversation_id")
+                    "content": data.get("choices", [{}])[0]
+                    .get("message", {})
+                    .get("content", "Sorry, I couldn't process that request."),
+                    "conversation_id": data.get("conversation_id"),
                 }
             else:
-                logger.error("OpenWebUI API error", status_code=response.status_code, response=response.text)
+                logger.error(
+                    "OpenWebUI API error",
+                    status_code=response.status_code,
+                    response=response.text,
+                )
                 return {
                     "success": False,
-                    "content": "Sorry, I'm having trouble connecting to the Planner service. Please try again later."
+                    "content": "Sorry, I'm having trouble connecting to the Planner service. Please try again later.",
                 }
 
         except Exception as e:
             logger.error("Error communicating with OpenWebUI", error=str(e))
             return {
                 "success": False,
-                "content": "Sorry, there was an error processing your request. Please try again."
+                "content": "Sorry, there was an error processing your request. Please try again.",
             }
 
-    async def close(self):
+    async def close(self) -> None:
         """Close the HTTP client"""
         await self.client.aclose()
+
 
 class TeamsBot(ActivityHandler):
     """
     Lightweight Teams bot that forwards conversations to OpenWebUI
     """
 
-    def __init__(self, openwebui_client: OpenWebUIClient, context_manager: ConversationContextManager):
+    def __init__(
+        self,
+        openwebui_client: OpenWebUIClient,
+        context_manager: ConversationContextManager,
+        attachment_handler: TeamsAttachmentHandler,
+    ):
         super().__init__()
         self.openwebui_client = openwebui_client
         self.context_manager = context_manager
+        self.attachment_handler = attachment_handler
         # Keep in-memory fallback for when Redis is unavailable
         self.conversations: Dict[str, str] = {}  # conversation_id mapping
 
-    async def _format_message_content(self, turn_context: TurnContext) -> Dict[str, Any]:
+    async def _format_message_content(
+        self, turn_context: TurnContext
+    ) -> Dict[str, Any]:
         """Extract and format message content including mentions and attachments"""
         try:
             activity = turn_context.activity
             message_content = {
                 "text": activity.text.strip() if activity.text else "",
                 "mentions": [],
-                "attachments": []
+                "attachments": [],
             }
 
             # Extract mentions
-            if hasattr(activity, 'entities') and activity.entities:
+            if hasattr(activity, "entities") and activity.entities:
                 for entity in activity.entities:
                     if entity.type == "mention":
                         mention = {
-                            "id": entity.mentioned.id if hasattr(entity, 'mentioned') else None,
-                            "name": entity.mentioned.name if hasattr(entity, 'mentioned') else None,
-                            "text": entity.text if hasattr(entity, 'text') else None
+                            "id": (
+                                entity.mentioned.id
+                                if hasattr(entity, "mentioned")
+                                else None
+                            ),
+                            "name": (
+                                entity.mentioned.name
+                                if hasattr(entity, "mentioned")
+                                else None
+                            ),
+                            "text": entity.text if hasattr(entity, "text") else None,
                         }
                         message_content["mentions"].append(mention)
                         logger.debug("Extracted mention", mention=mention)
 
             # Extract attachments
-            if hasattr(activity, 'attachments') and activity.attachments:
+            if hasattr(activity, "attachments") and activity.attachments:
                 for attachment in activity.attachments:
                     att = {
                         "content_type": attachment.content_type,
                         "content_url": attachment.content_url,
                         "name": attachment.name,
-                        "thumbnail_url": getattr(attachment, 'thumbnail_url', None)
+                        "thumbnail_url": getattr(attachment, "thumbnail_url", None),
                     }
                     message_content["attachments"].append(att)
                     logger.debug("Extracted attachment", attachment=att)
@@ -270,15 +332,16 @@ class TeamsBot(ActivityHandler):
                 if mention["text"] and mention["name"]:
                     # Replace mention text with readable format
                     formatted_text = formatted_text.replace(
-                        mention["text"],
-                        f"@{mention['name']}"
+                        mention["text"], f"@{mention['name']}"
                     )
 
             message_content["formatted_text"] = formatted_text
 
-            logger.debug("Formatted message content",
-                        has_mentions=len(message_content["mentions"]) > 0,
-                        has_attachments=len(message_content["attachments"]) > 0)
+            logger.debug(
+                "Formatted message content",
+                has_mentions=len(message_content["mentions"]) > 0,
+                has_attachments=len(message_content["attachments"]) > 0,
+            )
 
             return message_content
 
@@ -286,10 +349,18 @@ class TeamsBot(ActivityHandler):
             logger.error("Error formatting message content", error=str(e))
             # Fallback to simple text
             return {
-                "text": turn_context.activity.text.strip() if turn_context.activity.text else "",
-                "formatted_text": turn_context.activity.text.strip() if turn_context.activity.text else "",
+                "text": (
+                    turn_context.activity.text.strip()
+                    if turn_context.activity.text
+                    else ""
+                ),
+                "formatted_text": (
+                    turn_context.activity.text.strip()
+                    if turn_context.activity.text
+                    else ""
+                ),
                 "mentions": [],
-                "attachments": []
+                "attachments": [],
             }
 
     async def _extract_teams_token(self, turn_context: TurnContext) -> Optional[str]:
@@ -299,21 +370,24 @@ class TeamsBot(ActivityHandler):
             activity = turn_context.activity
 
             # Look for token in activity channel data
-            if hasattr(activity, 'channel_data') and activity.channel_data:
+            if hasattr(activity, "channel_data") and activity.channel_data:
                 # Teams may include auth info in channel_data
-                if 'authToken' in activity.channel_data:
-                    return activity.channel_data['authToken']
+                if "authToken" in activity.channel_data:
+                    return activity.channel_data["authToken"]
 
             # Look for token in additional properties
-            if hasattr(activity, 'additional_properties') and activity.additional_properties:
-                for key in ['authToken', 'access_token', 'token']:
+            if (
+                hasattr(activity, "additional_properties")
+                and activity.additional_properties
+            ):
+                for key in ["authToken", "access_token", "token"]:
                     if key in activity.additional_properties:
                         return activity.additional_properties[key]
 
             # Try to get from Bot Framework authorization header
             # This would typically be set by the Teams client during authentication
-            auth_header = turn_context.adapter.request.headers.get('Authorization')
-            if auth_header and auth_header.startswith('Bearer '):
+            auth_header = turn_context.adapter.request.headers.get("Authorization")
+            if auth_header and auth_header.startswith("Bearer "):
                 # Extract just the token part
                 token = auth_header[7:]  # Remove 'Bearer ' prefix
                 logger.debug("Extracted token from Authorization header")
@@ -338,28 +412,64 @@ class TeamsBot(ActivityHandler):
             # Extract Teams authentication token for forwarding
             teams_auth_token = await self._extract_teams_token(turn_context)
 
-            logger.info("Received message from Teams",
-                       user_id=user_id,
-                       message=user_message[:100],
-                       has_auth_token=bool(teams_auth_token),
-                       has_mentions=len(message_content["mentions"]) > 0,
-                       has_attachments=len(message_content["attachments"]) > 0)
+            logger.info(
+                "Received message from Teams",
+                user_id=user_id,
+                message=user_message[:100],
+                has_auth_token=bool(teams_auth_token),
+                has_mentions=len(message_content["mentions"]) > 0,
+                has_attachments=len(message_content["attachments"]) > 0,
+            )
 
             # Handle special commands
-            if user_message.lower() in ['/help', 'help']:
+            if user_message.lower() in ["/help", "help"]:
                 await self._send_help_message(turn_context)
                 return
 
-            if user_message.lower() in ['/reset', 'reset']:
+            if user_message.lower() in ["/reset", "reset"]:
                 # Clear both Redis and in-memory context
                 await self.context_manager.clear_context(conversation_id, user_id)
                 if conversation_id in self.conversations:
                     del self.conversations[conversation_id]
-                await turn_context.send_activity(MessageFactory.text("✅ Conversation reset. How can I help you with Microsoft Planner?"))
+                await turn_context.send_activity(
+                    MessageFactory.text(
+                        "✅ Conversation reset. How can I help you with Microsoft Planner?"
+                    )
+                )
                 return
 
             # Show typing indicator
             await turn_context.send_activity(Activity(type=ActivityTypes.typing))
+
+            # Process file attachments if present
+            attachment_response = ""
+            if message_content["attachments"]:
+                logger.info(
+                    "Processing file attachments",
+                    count=len(message_content["attachments"]),
+                )
+
+                # Process attachments with RAG service
+                attachment_results = await self.attachment_handler.process_attachments(
+                    turn_context.activity.attachments,
+                    turn_context,
+                    user_id,
+                    conversation_id,
+                )
+
+                # Format response for user
+                attachment_response = (
+                    self.attachment_handler.format_attachment_response(
+                        attachment_results
+                    )
+                )
+
+                # If we have attachments and no text message, send attachment response immediately
+                if not user_message.strip() and attachment_response:
+                    await turn_context.send_activity(
+                        MessageFactory.text(attachment_response)
+                    )
+                    return
 
             # Get existing conversation context from Redis
             context = await self.context_manager.get_context(conversation_id, user_id)
@@ -376,11 +486,16 @@ class TeamsBot(ActivityHandler):
                 message_content=message_content,
                 user_id=user_id,
                 conversation_id=openwebui_conversation_id,
-                auth_token=teams_auth_token
+                auth_token=teams_auth_token,
             )
 
             if response["success"]:
                 response_content = response["content"]
+
+                # Combine OpenWebUI response with attachment processing results
+                final_response = response_content
+                if attachment_response:
+                    final_response = f"{attachment_response}\n\n{response_content}"
 
                 # Store conversation ID for continuity in both Redis and memory
                 if response.get("conversation_id"):
@@ -391,11 +506,11 @@ class TeamsBot(ActivityHandler):
                         user_id,
                         response["conversation_id"],
                         user_message,
-                        response_content
+                        final_response,
                     )
 
                 # Send response back to Teams
-                await turn_context.send_activity(MessageFactory.text(response_content))
+                await turn_context.send_activity(MessageFactory.text(final_response))
 
             else:
                 # Store error response in context too
@@ -404,23 +519,29 @@ class TeamsBot(ActivityHandler):
                     user_id,
                     openwebui_conversation_id or "error",
                     user_message,
-                    response["content"]
+                    response["content"],
                 )
-                await turn_context.send_activity(MessageFactory.text(response["content"]))
+                await turn_context.send_activity(
+                    MessageFactory.text(response["content"])
+                )
 
         except Exception as e:
             logger.error("Error processing message", error=str(e))
             await turn_context.send_activity(
-                MessageFactory.text("Sorry, I encountered an error. Please try again or contact support.")
+                MessageFactory.text(
+                    "Sorry, I encountered an error. Please try again or contact support."
+                )
             )
 
-    async def on_members_added_activity(self, members_added: list, turn_context: TurnContext):
+    async def on_members_added_activity(
+        self, members_added: list, turn_context: TurnContext
+    ) -> None:
         """Welcome new members"""
         for member in members_added:
             if member.id != turn_context.activity.recipient.id:
                 await self._send_welcome_message(turn_context)
 
-    async def _send_welcome_message(self, turn_context: TurnContext):
+    async def _send_welcome_message(self, turn_context: TurnContext) -> None:
         """Send welcome message"""
         welcome_text = """
 🎉 **Welcome to Intelligent Teams Planner!**
@@ -447,7 +568,7 @@ Just start typing your request in natural language, and I'll help you manage you
         """
         await turn_context.send_activity(MessageFactory.text(welcome_text))
 
-    async def _send_help_message(self, turn_context: TurnContext):
+    async def _send_help_message(self, turn_context: TurnContext) -> None:
         """Send help message"""
         help_text = """
 🔧 **Intelligent Teams Planner Help**
@@ -480,6 +601,7 @@ Ready to help manage your Planner tasks! 🚀
         """
         await turn_context.send_activity(MessageFactory.text(help_text))
 
+
 def create_app() -> web.Application:
     """Create the web application"""
 
@@ -492,8 +614,25 @@ def create_app() -> web.Application:
     if not bot_app_id or not bot_app_password:
         raise ValueError("BOT_ID and BOT_PASSWORD must be set")
 
-    # Create bot framework authentication
-    settings = ConfigurationBotFrameworkAuthentication()
+    # Create configuration object for bot framework authentication
+    class DefaultConfig:
+        """Simple configuration for bot framework authentication"""
+
+        def __init__(self, app_id: str, app_password: str):
+            self.app_id = app_id
+            self.app_password = app_password
+
+        @property
+        def APP_ID(self) -> str:
+            return self.app_id
+
+        @property
+        def APP_PASSWORD(self) -> str:
+            return self.app_password
+
+    # Create configuration and authentication settings
+    config = DefaultConfig(bot_app_id, bot_app_password)
+    settings = ConfigurationBotFrameworkAuthentication(config)
 
     # Create OpenWebUI client
     openwebui_client = OpenWebUIClient(openwebui_url, openwebui_api_key)
@@ -503,9 +642,13 @@ def create_app() -> web.Application:
     conversation_ttl = int(os.getenv("CONVERSATION_TTL", "3600"))
     context_manager = ConversationContextManager(redis_url, conversation_ttl)
 
+    # Create attachment handler for RAG service integration
+    rag_service_url = os.getenv("RAG_SERVICE_URL", "http://localhost:7120")
+    attachment_handler = TeamsAttachmentHandler(rag_service_url)
+
     # Create bot adapter and bot
     adapter = CloudAdapter(settings)
-    bot = TeamsBot(openwebui_client, context_manager)
+    bot = TeamsBot(openwebui_client, context_manager, attachment_handler)
 
     async def messages(req: Request) -> Response:
         """Handle bot messages"""
@@ -518,9 +661,13 @@ def create_app() -> web.Application:
         auth_header = req.headers.get("Authorization", "")
 
         try:
-            invoke_response = await adapter.process_activity(activity, auth_header, bot.on_turn)
+            invoke_response = await adapter.process_activity(
+                activity, auth_header, bot.on_turn
+            )
             if invoke_response:
-                return json_response(data=invoke_response.body, status=invoke_response.status)
+                return json_response(
+                    data=invoke_response.body, status=invoke_response.status
+                )
             return Response(status=200)
         except Exception as e:
             logger.error("Error processing activity", error=str(e))
@@ -530,26 +677,33 @@ def create_app() -> web.Application:
         """Health check endpoint"""
         try:
             # Test OpenWebUI connectivity
-            health_check = await openwebui_client.client.get(f"{openwebui_url}/health", timeout=5.0)
-            openwebui_status = "healthy" if health_check.status_code == 200 else "unhealthy"
+            health_check = await openwebui_client.client.get(
+                f"{openwebui_url}/health", timeout=5.0
+            )
+            openwebui_status = (
+                "healthy" if health_check.status_code == 200 else "unhealthy"
+            )
         except Exception:
             openwebui_status = "unhealthy"
 
-        return json_response({
-            "status": "healthy",
-            "timestamp": datetime.utcnow().isoformat(),
-            "openwebui_status": openwebui_status,
-            "version": "2.0.0"
-        })
+        return json_response(
+            {
+                "status": "healthy",
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "openwebui_status": openwebui_status,
+                "version": "2.0.0",
+            }
+        )
 
-    async def startup(app):
+    async def startup(app) -> None:
         """Initialize connections on startup"""
         await context_manager.connect()
 
-    async def cleanup(app):
+    async def cleanup(app) -> None:
         """Cleanup on shutdown"""
         await openwebui_client.close()
         await context_manager.close()
+        await attachment_handler.close()
 
     # Create application
     app = web.Application(middlewares=[aiohttp_error_middleware])
@@ -560,11 +714,12 @@ def create_app() -> web.Application:
 
     return app
 
+
 def main():
     """Main entry point"""
     try:
         # Set up event loop
-        if sys.platform == 'win32':
+        if sys.platform == "win32":
             asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
 
         # Create application
@@ -581,6 +736,7 @@ def main():
     except Exception as e:
         logger.error("Failed to start Teams bot", error=str(e))
         sys.exit(1)
+
 
 if __name__ == "__main__":
     main()

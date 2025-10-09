@@ -22,10 +22,10 @@ from .tools import ToolRegistry, Tool, ToolResult
 from .cache import CacheService
 from .graph.webhooks import WebhookSubscriptionManager, create_webhook_router
 
-# Configure structured logging
+# Configure structured logging with DEBUG level
 structlog.configure(
     processors=[structlog.dev.ConsoleRenderer()],
-    wrapper_class=structlog.make_filtering_bound_logger(20),
+    wrapper_class=structlog.make_filtering_bound_logger(10),  # DEBUG level
     logger_factory=structlog.PrintLoggerFactory(),
     cache_logger_on_first_use=True
 )
@@ -60,11 +60,13 @@ async def lifespan(app: FastAPI):
         await cache_service.initialize()
 
         # Initialize auth service
+        testing_mode = os.getenv("TESTING_MODE", "false").lower() == "true"
         auth_service = AuthService(
-            client_id=os.getenv("MICROSOFT_CLIENT_ID"),
-            client_secret=os.getenv("MICROSOFT_CLIENT_SECRET"),
-            tenant_id=os.getenv("MICROSOFT_TENANT_ID"),
-            cache_service=cache_service
+            client_id=os.getenv("MICROSOFT_CLIENT_ID", "test-client-id"),
+            client_secret=os.getenv("MICROSOFT_CLIENT_SECRET", "test-client-secret"),
+            tenant_id=os.getenv("MICROSOFT_TENANT_ID", "test-tenant-id"),
+            cache_service=cache_service,
+            testing_mode=testing_mode
         )
 
         # Initialize Graph API client
@@ -378,7 +380,7 @@ def main():
     """Main entry point"""
     try:
         host = os.getenv("HOST", "0.0.0.0")
-        port = int(os.getenv("PORT", "8000"))
+        port = int(os.getenv("PORT", "7100"))
 
         logger.info("Starting Intelligent Teams Planner MCP Server", host=host, port=port)
 

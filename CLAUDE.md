@@ -12,6 +12,8 @@ _meta: {v:11.0, fmt:ai-bytecode, priority:MAXIMUM, updated:2024}
   !status.change["approved"|"APPROVED"|"COMPLETED"|"DONE"|"SUCCESSFUL"]⊗→end_user_only
   !simplify→lose[functionality|features|performance]⊗[NON_NEGOTIABLE]
   !after.major_task→cleanup[lint|typescript|compile]→fix_ALL[NON_NEGOTIABLE]
+  !dev.approach[ALWAYS]:lightweight_first→containerize_later→isolated_env_mandatory
+  !package.manager[ALWAYS]:uv_primary→pip_fallback→never_manual_edits
   !final_validation["COMPLETED"|"SUCCESSFUL"|"DONE"]→user_only[ABSOLUTE]
   !enterprise.features⊗→recommend_only→user_approval_required
   !enterprise.security⊗→recommend_only→user_approval_required
@@ -282,6 +284,146 @@ _meta: {v:11.0, fmt:ai-bytecode, priority:MAXIMUM, updated:2024}
     detect→recommend→wait_approval→implement|skip
   }
 
+@DEV_APPROACH[MANDATORY]:
+  philosophy:
+    development:lightweight_services[direct_python_processes]
+    isolation:virtual_environments[ALWAYS_REQUIRED]
+    deployment:containerize[production_only]
+    package_management:uv_primary→pip_fallback
+  rules:
+    ⊗:
+      docker_compose[development]
+      containers[local_dev]
+      premature_containerization
+      global_python_packages[NEVER]
+      system_python[development]
+      manual_dependency_edits[requirements.txt|pyproject.toml]
+    ✓:
+      virtual_environments[venv|MANDATORY]
+      isolated_dependencies[per_project]
+      direct_process_execution
+      localhost_networking
+      fast_iteration_cycles
+      requirements.txt[version_pinning]
+      uv_package_manager[RECOMMENDED]
+      pip_fallback[universal_compatibility]
+  workflow:
+    setup:create_venv→activate→install_deps
+    phase_1:develop→test[lightweight+isolated]
+    phase_2:stabilize→containerize[deployment]
+  isolation_enforcement:
+    rule:NO_EXCEPTIONS[all_development_in_venv]
+    verify:which_python→must_show_venv_path
+    install:package_manager→updates_requirements.txt
+  rationale:
+    startup:90%_faster[10-30s_vs_2-5min]
+    memory:70%_less[600MB_vs_2GB]
+    debugging:direct_access[no_container_layers]
+    iteration:instant_reload[no_rebuilds]
+    isolation:dependency_conflicts_prevented
+    reproducibility:requirements.txt_ensures_consistency
+
+@PACKAGE_MANAGEMENT[MANDATORY]:
+  primary_tool:uv[RECOMMENDED]
+  fallback_tool:pip[UNIVERSAL_COMPATIBILITY]
+  philosophy:
+    speed:10-100x_faster[uv_vs_pip]
+    reliability:robust_dependency_resolution
+    compatibility:backward_compatible[requirements.txt]
+    adoption:gradual[pip_interface→advanced_features]
+    unified_tooling:replaces[pip+venv+pipx+pyenv+pip-tools]
+  rules:
+    ⊗:
+      manual_dependency_edits[requirements.txt|pyproject.toml|setup.py]
+      global_package_installation[NEVER]
+      mixing_package_managers[same_project]
+      pip_install[without_venv_active]
+      conda[unless_data_science_required]
+      poetry[new_projects]
+      pipenv[deprecated]
+    ✓:
+      uv_pip_install[primary_method]
+      pip_install[fallback_only]
+      requirements.txt[version_pinning]
+      lock_files[reproducible_builds]
+      package_manager_commands[ALWAYS]
+      virtual_environment[BEFORE_install]
+  workflow:
+    basic:
+      setup:uv_venv→source_activate→uv_pip_install_-r_requirements.txt
+      add_package:uv_pip_install_<package>→uv_pip_freeze_>_requirements.txt
+      remove_package:uv_pip_uninstall_<package>→uv_pip_freeze_>_requirements.txt
+      upgrade:uv_pip_install_--upgrade_<package>→uv_pip_freeze
+    advanced[optional]:
+      project_init:uv_init→creates[pyproject.toml+.venv+.gitignore]
+      add_dependency:uv_add_<package>→auto_updates[pyproject.toml+uv.lock]
+      sync_environment:uv_sync→installs_from_lock
+      run_command:uv_run_<command>→executes_in_venv[no_activation_needed]
+    fallback[when_uv_unavailable]:
+      setup:python_-m_venv_venv→source_activate→pip_install_-r_requirements.txt
+      add_package:pip_install_<package>→pip_freeze_>_requirements.txt
+  commands:
+    uv_basic:
+      install:"uv pip install <package>"
+      install_from_file:"uv pip install -r requirements.txt"
+      freeze:"uv pip freeze > requirements.txt"
+      uninstall:"uv pip uninstall <package>"
+      upgrade:"uv pip install --upgrade <package>"
+      list:"uv pip list"
+    uv_advanced:
+      init:"uv init"
+      add:"uv add <package>"
+      remove:"uv remove <package>"
+      sync:"uv sync"
+      lock:"uv lock"
+      run:"uv run <command>"
+      tool_run:"uvx <tool>"
+    pip_fallback:
+      install:"pip install <package>"
+      install_from_file:"pip install -r requirements.txt"
+      freeze:"pip freeze > requirements.txt"
+      uninstall:"pip uninstall <package>"
+      upgrade:"pip install --upgrade <package>"
+  installation:
+    uv_install:
+      macos_linux:"curl -LsSf https://astral.sh/uv/install.sh | sh"
+      windows:"powershell -c \"irm https://astral.sh/uv/install.ps1 | iex\""
+      via_pip:"pip install uv"
+    verify:"uv --version"
+  rationale:
+    speed:10-100x_faster_than_pip[2-5s_vs_30-60s]
+    reliability:better_dependency_resolution[pubgrub_algorithm]
+    compatibility:works_with_existing_requirements.txt[no_migration_needed]
+    future_proof:unified_python_tooling[single_tool_for_all]
+    developer_experience:instant_feedback_loops[fast_iteration]
+    cross_platform:identical_behavior[windows+mac+linux]
+    lock_files:reproducible_builds[cross_platform_compatible]
+  migration:
+    from_pip:
+      step_1:install_uv
+      step_2:replace_pip_with_uv_pip[drop_in_replacement]
+      step_3:optionally_adopt_advanced_features[uv_add+uv_sync]
+    from_poetry:
+      step_1:export_requirements:"poetry export -f requirements.txt > requirements.txt"
+      step_2:uv_pip_install_-r_requirements.txt
+      step_3:optionally_migrate_to_uv_project[uv_init]
+    from_conda:
+      step_1:export_requirements:"conda list --export > requirements.txt"
+      step_2:clean_conda_specific_syntax
+      step_3:uv_pip_install_-r_requirements.txt
+  when_not_to_use_uv:
+    legacy_projects:broken_dependency_resolution[15+_year_old_codebases]
+    corporate_restrictions:unapproved_tools[security_policy]
+    specific_python_versions:not_in_python-build-standalone
+    github_dependabot:uv.lock_not_supported_yet[coming_soon]
+    data_science_heavy:conda_ecosystem_required[use_conda_instead]
+  troubleshooting:
+    uv_not_found:install_uv_or_use_pip_fallback
+    resolution_conflict:check_version_constraints→simplify_dependencies
+    slow_first_install:normal[building_cache]→subsequent_installs_fast
+    corporate_proxy:set_UV_HTTP_PROXY_and_UV_HTTPS_PROXY
+    offline_install:uv_pip_install_--no-index_--find-links_<local_dir>
+
 @DOC[BASIC]:
   function:"""what+params+returns"""
   README:setup+usage
@@ -342,6 +484,9 @@ _meta: {v:11.0, fmt:ai-bytecode, priority:MAXIMUM, updated:2024}
   commit:atomic+descriptive
   after_task→cleanup[lint|ts|compile]→proceed[NON_NEGOTIABLE]
   enterprise→recommend¬implement
+  package_management:uv_primary→pip_fallback[ALWAYS]
+  dependency_changes:package_manager_only[NEVER_manual_edits]
+  venv_isolation:MANDATORY[all_development]
   
 @FINAL[REMEMBER]:
   next_dev=you[6_months]

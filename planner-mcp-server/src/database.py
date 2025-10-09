@@ -146,15 +146,21 @@ class Database:
     async def initialize(self):
         """Initialize database connection and create tables"""
         try:
-            # Create async engine
-            self.engine = create_async_engine(
-                self.database_url,
-                echo=os.getenv("DB_ECHO", "false").lower() == "true",
-                pool_size=10,
-                max_overflow=20,
-                pool_pre_ping=True,
-                pool_recycle=3600
-            )
+            # Create async engine with database-specific parameters
+            engine_kwargs = {
+                "echo": os.getenv("DB_ECHO", "false").lower() == "true",
+            }
+
+            # Add pool parameters only for non-SQLite databases
+            if not self.database_url.startswith("sqlite"):
+                engine_kwargs.update({
+                    "pool_size": 10,
+                    "max_overflow": 20,
+                    "pool_pre_ping": True,
+                    "pool_recycle": 3600
+                })
+
+            self.engine = create_async_engine(self.database_url, **engine_kwargs)
 
             # Create session factory
             self.session_factory = async_sessionmaker(
@@ -163,15 +169,16 @@ class Database:
                 expire_on_commit=False
             )
 
-            # Create direct connection pool for raw queries
-            self._connection_pool = await asyncpg.create_pool(
-                self.database_url.replace("postgresql+asyncpg://", "postgresql://"),
-                min_size=1,
-                max_size=10
-            )
+            # Create direct connection pool for raw queries (PostgreSQL only)
+            if not self.database_url.startswith("sqlite"):
+                self._connection_pool = await asyncpg.create_pool(
+                    self.database_url.replace("postgresql+asyncpg://", "postgresql://"),
+                    min_size=1,
+                    max_size=10
+                )
 
-            # Initialize pgvector extension
-            await self._initialize_pgvector()
+                # Initialize pgvector extension
+                await self._initialize_pgvector()
 
             # Create tables
             async with self.engine.begin() as conn:
@@ -186,9 +193,12 @@ class Database:
     async def _initialize_pgvector(self):
         """Initialize pgvector extension"""
         try:
-            async with self._connection_pool.acquire() as conn:
-                await conn.execute("CREATE EXTENSION IF NOT EXISTS vector")
-                logger.info("pgvector extension initialized")
+            if self._connection_pool:
+                async with self._connection_pool.acquire() as conn:
+                    await conn.execute("CREATE EXTENSION IF NOT EXISTS vector")
+                    logger.info("pgvector extension initialized")
+            else:
+                logger.info("Skipping pgvector initialization for SQLite database")
         except Exception as e:
             logger.warning("Failed to initialize pgvector extension", error=str(e))
 
@@ -207,7 +217,7 @@ class Database:
         """Check database health"""
         try:
             async with self.session_factory() as session:
-                result = await session.execute(func.select(1))
+                result = await session.execute("SELECT 1")
                 result.scalar()
                 return "healthy"
         except Exception as e:

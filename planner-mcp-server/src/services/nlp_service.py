@@ -38,6 +38,16 @@ class NLPProcessingResult:
     clarification_requests: Optional[List[Any]] = None
     natural_language_response: Optional[str] = None
 
+    @property
+    def confidence(self) -> float:
+        """Backward compatibility property for confidence_score"""
+        return self.confidence_score
+
+    def __post_init__(self):
+        """Ensure clarification_requests is always a list"""
+        if self.clarification_requests is None:
+            self.clarification_requests = []
+
 
 class NLPService:
     """
@@ -143,6 +153,15 @@ class NLPService:
                 intent, resolved_entities, suggested_action
             )
 
+            # Initialize clarification_requests based on clarification_needed
+            clarification_requests = []
+            if clarification_needed:
+                clarification_requests = [{
+                    "question": clarification_needed,
+                    "question_type": "input_request",
+                    "parameter_name": "missing_info"
+                }]
+
             # Step 8: Update Conversation Context
             context_updated = await self._update_conversation_context(
                 user_id, session_id, user_input, intent, resolved_entities
@@ -150,6 +169,10 @@ class NLPService:
 
             # Calculate overall confidence
             confidence_score = intent_confidence
+
+            # Reduce confidence when clarification is needed
+            if clarification_needed:
+                confidence_score = min(confidence_score * 0.6, 0.6)  # Max 0.6 when clarification needed
 
             processing_time = (datetime.now() - start_time).total_seconds()
 
@@ -165,6 +188,7 @@ class NLPService:
                 is_batch_operation=batch_operation is not None and batch_operation.get("is_batch", False),
                 batch_info=batch_operation,
                 needs_clarification=clarification_needed is not None,
+                clarification_requests=clarification_requests,
                 metadata={
                     "resolved_entities": resolved_entities,
                     "user_id": user_id,
@@ -338,8 +362,10 @@ class NLPService:
                 if "TASK_TITLE" not in entities and "PLAN_NAME" not in entities:
                     return "Which task would you like to update?"
 
-            # Ambiguous date references
-            if suggested_action.get("parameters", {}).get("due_date") and len(entities.get("DUE_DATE", [])) > 1:
+            # Ambiguous date references - only check if DUE_DATE is actually a list
+            due_date_entity = entities.get("DUE_DATE", [])
+            if (suggested_action.get("parameters", {}).get("due_date") and
+                isinstance(due_date_entity, list) and len(due_date_entity) > 1):
                 return "I found multiple dates in your request. Which date should I use as the due date?"
 
             # Destructive operations without confirmation

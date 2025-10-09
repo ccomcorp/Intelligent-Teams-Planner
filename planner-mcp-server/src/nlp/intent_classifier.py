@@ -23,6 +23,14 @@ class IntentMatch:
     alternatives: List[Tuple[str, float]]
 
 
+@dataclass
+class IntentResult:
+    """Result of intent classification - alias for compatibility"""
+    intent: str
+    confidence: float
+    alternatives: List[Tuple[str, float]]
+
+
 class IntentClassifier:
     """
     Intent classification using sentence transformers and keyword matching
@@ -69,7 +77,13 @@ class IntentClassifier:
                     "Modify the task description",
                     "Edit the presentation task",
                     "Update task status to in progress",
-                    "Change the assignee of the budget task"
+                    "Change the assignee of the budget task",
+                    "Update the task 'Review budget' to be due tomorrow",
+                    "Change the priority of 'Client meeting' to high",
+                    "Modify the task description for project planning",
+                    "Update budget review task due date",
+                    "Change client meeting task priority level",
+                    "Modify project planning task details"
                 ],
                 "keywords": ["update", "change", "modify", "edit", "alter", "revise", "adjust"]
             },
@@ -212,13 +226,32 @@ class IntentClassifier:
 
             # Combine keyword and semantic results if both available
             if keyword_match and semantic_match:
-                # Weighted combination: 60% semantic, 40% keyword
-                combined_confidence = (0.6 * semantic_match.confidence +
-                                     0.4 * keyword_match.confidence)
+                # Adaptive weighting: favor keyword when it's strong, semantic when keyword is weak
+                if keyword_match.confidence >= 0.7:
+                    # Strong keyword match - favor keywords heavily
+                    semantic_weight = 0.3
+                    keyword_weight = 0.7
+                elif keyword_match.confidence >= 0.5:
+                    # Moderate keyword match - balanced weighting
+                    semantic_weight = 0.5
+                    keyword_weight = 0.5
+                else:
+                    # Weak keyword match - favor semantic
+                    semantic_weight = 0.7
+                    keyword_weight = 0.3
 
-                # Use semantic intent if confidence is higher, otherwise keyword
-                final_intent = (semantic_match.intent if semantic_match.confidence > keyword_match.confidence
-                               else keyword_match.intent)
+                combined_confidence = (semantic_weight * semantic_match.confidence +
+                                     keyword_weight * keyword_match.confidence)
+
+                # Use intent with higher individual confidence, but boost keyword when both are close
+                confidence_diff = abs(semantic_match.confidence - keyword_match.confidence)
+                if confidence_diff < 0.1 and keyword_match.confidence >= 0.5:
+                    # Very close confidence - prefer keyword match
+                    final_intent = keyword_match.intent
+                elif keyword_match.confidence > semantic_match.confidence:
+                    final_intent = keyword_match.intent
+                else:
+                    final_intent = semantic_match.intent
 
                 return IntentMatch(
                     intent=final_intent,
@@ -252,22 +285,38 @@ class IntentClassifier:
         for intent, definition in self.intent_definitions.items():
             score = 0
             matched_keywords = []
+            keyword_count = len(definition["keywords"])
 
             for keyword in definition["keywords"]:
                 # Check for exact phrase match or word boundary match
                 if keyword in normalized_input:
                     if " " in keyword:  # Multi-word phrase
-                        score += 2  # Higher weight for phrase matches
+                        score += 3  # Higher weight for phrase matches
                     else:  # Single word - check word boundaries
                         pattern = r'\b' + re.escape(keyword) + r'\b'
                         if re.search(pattern, normalized_input):
-                            score += 1
+                            score += 2  # Increased weight for exact word matches
                     matched_keywords.append(keyword)
 
             if score > 0:
-                # Normalize score by number of keywords for this intent
-                normalized_score = min(score / len(definition["keywords"]), 1.0)
-                intent_scores[intent] = (normalized_score, matched_keywords)
+                # Enhanced scoring: base score + bonus for multiple matches
+                base_score = min(score / keyword_count, 1.0)
+                match_ratio = len(matched_keywords) / keyword_count
+
+                # Boost confidence when we have strong keyword matches
+                if match_ratio >= 0.5:  # 50% or more keywords matched
+                    confidence_boost = 0.3 * match_ratio
+                elif match_ratio >= 0.25:  # 25% or more keywords matched
+                    confidence_boost = 0.2 * match_ratio
+                else:
+                    confidence_boost = 0.1 * match_ratio
+
+                # Strong keyword matches get significant boost
+                if score >= 3:  # High-value keywords matched
+                    confidence_boost += 0.2
+
+                final_score = min(base_score + confidence_boost, 1.0)
+                intent_scores[intent] = (final_score, matched_keywords)
 
         if not intent_scores:
             return None
@@ -368,3 +417,36 @@ class IntentClassifier:
         """Get all supported intents with their descriptions"""
         return {intent: definition["description"]
                 for intent, definition in self.intent_definitions.items()}
+
+    def _calculate_semantic_similarity(self, text1: str, text2: str) -> float:
+        """Calculate semantic similarity between two text strings"""
+        try:
+            # Simple word-based similarity for testing
+            words1 = set(text1.lower().split())
+            words2 = set(text2.lower().split())
+
+            if not words1 or not words2:
+                return 0.0
+
+            # Calculate intersection and total words
+            intersection = len(words1.intersection(words2))
+
+            # Enhanced similarity calculation that favors shared important words
+            # Give higher weight when key action words match
+            key_words = {'create', 'task', 'new', 'add', 'make', 'update', 'delete', 'list', 'show'}
+            key_intersection = len(words1.intersection(words2).intersection(key_words))
+
+            # Base Jaccard similarity
+            union = len(words1.union(words2))
+            jaccard = intersection / union if union > 0 else 0.0
+
+            # Boost similarity if important words match
+            if key_intersection > 0:
+                boost = min(0.3, key_intersection * 0.15)
+                return min(1.0, jaccard + boost)
+
+            return jaccard
+
+        except Exception as e:
+            logger.error("Error calculating semantic similarity", error=str(e))
+            return 0.0

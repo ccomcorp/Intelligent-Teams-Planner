@@ -21,88 +21,175 @@ from src.database import Database
 from src.cache import CacheService
 
 
+# Module-level fixtures shared across test classes
+@pytest.fixture
+async def database():
+    """Create test database instance"""
+    # Use in-memory SQLite with async driver for tests
+    database = Database("sqlite+aiosqlite:///:memory:")
+    await database.initialize()
+
+    yield database
+    await database.close()
+
+
+@pytest.fixture
+async def cache_service():
+    """Create test cache service instance"""
+    import fakeredis.aioredis
+
+    # Create a mock cache service that uses fakeredis
+    cache = CacheService("redis://fake")
+
+    # Replace the redis client with fakeredis before initialization
+    cache.redis_client = fakeredis.aioredis.FakeRedis(decode_responses=True)
+
+    # Skip the URL-based initialization since we've set the client directly
+    try:
+        await cache.redis_client.ping()
+        # Cache service initialized successfully (fake)
+    except Exception as e:
+        raise Exception(f"Cache initialization failed: {str(e)}")
+
+    yield cache
+
+    # Clean up
+    await cache.redis_client.close()
+
+
+@pytest.fixture
+async def webhook_manager(database, cache_service):
+    """Create webhook manager with test configuration"""
+    # Create manager first
+    manager = WebhookSubscriptionManager(database, cache_service)
+
+    # Override configuration after creation - this works reliably
+    manager.webhook_base_url = "https://test.example.com/webhooks"
+    manager.webhook_secret = "test_webhook_secret_key_123"
+    manager.validation_token_timeout = 300
+    manager.renewal_buffer = 86400
+    manager.retry_attempts = 3
+    manager.retry_delay = 1
+    manager.notification_timeout = 30
+    manager.signature_algorithm = "HMAC-SHA256"
+
+    # Debug: Verify configuration is set
+    print(f"DEBUG: webhook_base_url = '{manager.webhook_base_url}'")
+    print(f"DEBUG: webhook_secret = '{manager.webhook_secret}'")
+
+    await manager.initialize()
+    yield manager
+    await manager.shutdown()
+
+
+@pytest.fixture
+def real_planner_plan_subscription_data():
+    """Real Microsoft Graph planner plan subscription data"""
+    return {
+        "resource": "/planner/plans/12345678-1234-1234-1234-123456789012",
+        "change_types": ["created", "updated", "deleted"],
+        "user_id": "john.smith@acme.com",
+        "client_state": "project_alpha_notifications",
+        "tenant_id": "87654321-4321-4321-4321-210987654321",
+        "expiration_hours": 336  # 14 days
+    }
+
+
+@pytest.fixture
+def real_webhook_notification_plan():
+    """Real Microsoft Graph webhook notification for plan change"""
+    return {
+        "value": [
+            {
+                "subscriptionId": "12345678-abcd-efgh-ijkl-123456789012",
+                "clientState": "project_alpha_notifications",
+                "changeType": "updated",
+                "resource": "/planner/plans/12345678-1234-1234-1234-123456789012",
+                "subscriptionExpirationDateTime": "2024-10-14T14:30:00.0000000Z",
+                "resourceData": {
+                    "@odata.type": "#Microsoft.Graph.plannerPlan",
+                    "@odata.id": "https://graph.microsoft.com/v1.0/planner/plans/12345678-1234-1234-1234-123456789012",
+                    "@odata.etag": "W/\"JzEtUGxhbiAgQEBAQEBAQEBAQEBARCc=\"",
+                    "id": "12345678-1234-1234-1234-123456789012"
+                },
+                "tenantId": "87654321-4321-4321-4321-210987654321"
+            }
+        ]
+    }
+
+
+@pytest.fixture
+def real_webhook_notification_task():
+    """Real Microsoft Graph webhook notification for task change"""
+    return {
+        "value": [
+            {
+                "subscriptionId": "98765432-wxyz-mnop-qrst-987654321098",
+                "clientState": "task_tracking_v2",
+                "changeType": "created",
+                "resource": "/planner/tasks/76543210-9876-5432-1098-765432109876",
+                "subscriptionExpirationDateTime": "2024-10-11T08:15:00.0000000Z",
+                "resourceData": {
+                    "@odata.type": "#Microsoft.Graph.plannerTask",
+                    "@odata.id": "https://graph.microsoft.com/v1.0/planner/tasks/76543210-9876-5432-1098-765432109876",
+                    "@odata.etag": "W/\"JzEtVGFzayAgQEBAQEBAQEBAQEBARCc=\"",
+                    "id": "76543210-9876-5432-1098-765432109876"
+                },
+                "tenantId": "87654321-4321-4321-4321-210987654321"
+            }
+        ]
+    }
+
+
+@pytest.fixture
+def real_webhook_notification_group():
+    """Real Microsoft Graph webhook notification for group change"""
+    return {
+        "value": [
+            {
+                "subscriptionId": "11111111-aaaa-bbbb-cccc-111111111111",
+                "clientState": "group_membership_alerts",
+                "changeType": "updated",
+                "resource": "/groups/33333333-3333-3333-3333-333333333333/members",
+                "subscriptionExpirationDateTime": "2024-10-20T16:45:00.0000000Z",
+                "resourceData": {
+                    "@odata.type": "#Microsoft.Graph.group",
+                    "@odata.id": "https://graph.microsoft.com/v1.0/groups/33333333-3333-3333-3333-333333333333",
+                    "@odata.etag": "W/\"JzEtR3JvdXAgQEBAQEBAQEBAQEBARCc=\"",
+                    "id": "33333333-3333-3333-3333-333333333333"
+                },
+                "tenantId": "87654321-4321-4321-4321-210987654321"
+            }
+        ]
+    }
+
+
+@pytest.fixture
+def app(fastapi_webhook_manager):
+    """Create FastAPI test app with webhook routes"""
+    from fastapi import FastAPI
+    app = FastAPI()
+    webhook_router = create_webhook_router(fastapi_webhook_manager)
+    app.include_router(webhook_router, prefix="/webhooks")
+    return app
+
+
+@pytest.fixture
+async def client(app):
+    """Create async test client"""
+    from httpx import AsyncClient
+    async with AsyncClient(app=app, base_url="http://test") as client:
+        yield client
+
+
 class TestWebhookSubscriptionManager:
     """Test cases for WebhookSubscriptionManager using real data"""
 
-    @pytest.fixture
-    async def database(self):
-        """Create test database instance"""
-        # Use in-memory SQLite for tests
-        database = Database("sqlite:///:memory:")
-        await database.initialize()
-
-        # Create webhook tables
-        await database.execute("""
-            CREATE TABLE webhook_subscriptions (
-                subscription_id TEXT PRIMARY KEY,
-                tenant_id TEXT,
-                user_id TEXT,
-                resource TEXT,
-                expiration_date_time TIMESTAMP,
-                subscription_data JSON,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-
-        await database.execute("""
-            CREATE TABLE webhook_notifications (
-                notification_id TEXT PRIMARY KEY,
-                subscription_id TEXT,
-                tenant_id TEXT,
-                change_type TEXT,
-                resource TEXT,
-                notification_data JSON,
-                received_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                processed BOOLEAN DEFAULT FALSE
-            )
-        """)
-
-        yield database
-        await database.close()
-
-    @pytest.fixture
-    async def cache_service(self):
-        """Create test cache service instance"""
-        # Use in-memory cache for tests
-        cache = CacheService("memory://")
-        await cache.initialize()
-        yield cache
-        await cache.close()
-
-    @pytest.fixture
-    async def webhook_manager(self, database, cache_service):
-        """Create webhook manager with test configuration"""
-        # Set test environment variables
-        import os
-        os.environ.update({
-            "WEBHOOK_BASE_URL": "https://test.example.com/webhooks",
-            "WEBHOOK_SECRET": "test_webhook_secret_key_123",
-            "WEBHOOK_VALIDATION_TOKEN_TIMEOUT": "300",
-            "WEBHOOK_SUBSCRIPTION_RENEWAL_BUFFER": "86400",
-            "WEBHOOK_RETRY_ATTEMPTS": "3",
-            "WEBHOOK_RETRY_DELAY": "1",
-            "WEBHOOK_NOTIFICATION_TIMEOUT": "30",
-            "WEBHOOK_SIGNATURE_ALGORITHM": "HMAC-SHA256"
-        })
-
-        manager = WebhookSubscriptionManager(database, cache_service)
-        await manager.initialize()
-        yield manager
-        await manager.shutdown()
-
-    @pytest.fixture
-    def real_planner_plan_subscription_data(self):
-        """Real Microsoft Graph planner plan subscription data"""
-        return {
-            "resource": "/planner/plans/12345678-1234-1234-1234-123456789012",
-            "change_types": ["created", "updated", "deleted"],
-            "user_id": "john.smith@acme.com",
-            "tenant_id": "87654321-4321-4321-4321-210987654321",
-            "client_state": "project_alpha_notifications",
-            "include_resource_data": False,
-            "expiration_hours": 168
-        }
+    def test_basic_initialization(self, webhook_manager):
+        """Test that webhook manager initializes correctly"""
+        assert webhook_manager is not None
+        assert hasattr(webhook_manager, 'database')
+        assert hasattr(webhook_manager, 'cache_service')
 
     @pytest.fixture
     def real_planner_task_subscription_data(self):
@@ -202,6 +289,12 @@ class TestWebhookSubscriptionManager:
         real_planner_plan_subscription_data
     ):
         """Test creating a webhook subscription for planner plan changes"""
+        # Debug: Check environment variables and manager configuration
+        import os
+        print(f"TEST DEBUG: WEBHOOK_BASE_URL env = '{os.getenv('WEBHOOK_BASE_URL')}'")
+        print(f"TEST DEBUG: manager.webhook_base_url = '{webhook_manager.webhook_base_url}'")
+        print(f"TEST DEBUG: manager.webhook_secret = '{webhook_manager.webhook_secret}'")
+
         # Create subscription
         subscription = await webhook_manager.create_subscription(**real_planner_plan_subscription_data)
 
@@ -730,7 +823,7 @@ class TestWebhookSubscriptionManager:
 
 
 @pytest.fixture
-def webhook_manager(cache):
+def fastapi_webhook_manager(cache):
     """Provide webhook manager for FastAPI tests"""
     from src.graph.webhooks import WebhookSubscriptionManager
     # Create mock database
@@ -742,17 +835,23 @@ def webhook_manager(cache):
         async def delete_webhook_subscription(self, subscription_id):
             return True
 
-    return WebhookSubscriptionManager(database=MockDatabase(), cache_service=cache)
+    manager = WebhookSubscriptionManager(database=MockDatabase(), cache_service=cache)
+
+    # Configure for tests
+    manager.webhook_base_url = "https://test.example.com/webhooks"
+    manager.webhook_secret = "test_webhook_secret_key_123"
+
+    return manager
 
 
 class TestWebhookFastAPIEndpoints:
     """Test FastAPI webhook endpoints with real request data"""
 
     @pytest.fixture
-    def app(self, webhook_manager):
+    def app(self, fastapi_webhook_manager):
         """Create FastAPI app with webhook endpoints"""
         app = FastAPI()
-        webhook_router = create_webhook_router(webhook_manager)
+        webhook_router = create_webhook_router(fastapi_webhook_manager)
         app.include_router(webhook_router)
         return app
 
@@ -773,7 +872,7 @@ class TestWebhookFastAPIEndpoints:
     def test_webhook_notification_endpoint_valid_signature(
         self,
         client,
-        webhook_manager,
+        fastapi_webhook_manager,
         real_webhook_notification_plan
     ):
         """Test webhook endpoint with valid notification and signature"""

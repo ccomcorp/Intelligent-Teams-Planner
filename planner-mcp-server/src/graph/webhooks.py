@@ -10,7 +10,7 @@ import json
 import uuid
 import asyncio
 from typing import Dict, List, Any, Optional, Tuple
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from dataclasses import asdict
 from urllib.parse import urljoin
 import structlog
@@ -318,7 +318,7 @@ class WebhookSubscriptionManager:
             return {
                 "success": True,
                 "processed_count": len(payload["value"]),
-                "timestamp": datetime.utcnow().isoformat()
+                "timestamp": datetime.now(timezone.utc).isoformat()
             }
 
         except HTTPException:
@@ -485,7 +485,7 @@ class WebhookSubscriptionManager:
                 "notification_queue_size": queue_size,
                 "processor_running": self._notification_processor_task and not self._notification_processor_task.done(),
                 "renewal_monitor_running": self._subscription_renewal_task and not self._subscription_renewal_task.done(),
-                "timestamp": datetime.utcnow().isoformat()
+                "timestamp": datetime.now(timezone.utc).isoformat()
             }
 
         except Exception as e:
@@ -493,7 +493,7 @@ class WebhookSubscriptionManager:
             return {
                 "status": "unhealthy",
                 "error": str(e),
-                "timestamp": datetime.utcnow().isoformat()
+                "timestamp": datetime.now(timezone.utc).isoformat()
             }
 
     # Private methods

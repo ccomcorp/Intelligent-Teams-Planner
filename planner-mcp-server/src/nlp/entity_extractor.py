@@ -57,12 +57,15 @@ class EntityExtractor:
             },
             "DUE_DATE": {
                 "patterns": [
-                    r"(?:due|deadline|by|until|before)\s+(.+?)(?:\s|$|,|\.|;)",
+                    r"(?:due|deadline|by|until|before)\s+(tomorrow|today|yesterday)",
+                    r"(?:due|deadline|by|until|before)\s+(.+?(?:week|month|day|year|friday|monday|tuesday|wednesday|thursday|saturday|sunday))",
+                    r"(?:due|deadline|by|until|before)\s+(\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4})",
+                    r"(?:due|deadline|by|until|before)\s+(january|february|march|april|may|june|july|august|september|october|november|december)\s+\d{1,2}",
                     r"(?:next|this|last)\s+(monday|tuesday|wednesday|thursday|friday|saturday|sunday)",
                     r"(?:in\s+)?(\d+)\s+(day|days|week|weeks|month|months)",
-                    r"(today|tomorrow|yesterday)",
-                    r"(\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4})",  # Date formats
-                    r"(january|february|march|april|may|june|july|august|september|october|november|december)\s+\d{1,2}",
+                    r"(today|tomorrow|yesterday)(?!\s+\w)",
+                    r"(\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4})",
+                    r"(january|february|march|april|may|june|july|august|september|october|november|december)\s+\d{1,2}(?:st|nd|rd|th)?",
                 ],
                 "context_words": ["due", "deadline", "by", "until", "before", "schedule"]
             },
@@ -109,13 +112,16 @@ class EntityExtractor:
             }
         }
 
-        # Priority mappings
+        # Priority mappings (bidirectional)
         self.priority_mappings = {
             "urgent": "high",
             "critical": "high",
             "important": "high",
             "normal": "medium",
-            "low": "low"
+            "low": "low",
+            # Reverse mappings for flexible matching
+            "high": "urgent",
+            "medium": "normal"
         }
 
         # Status mappings
@@ -318,6 +324,30 @@ class EntityExtractor:
                           for word in context_words)
         if context_found:
             base_confidence += 0.1
+
+        # Special handling for DUE_DATE to prioritize over other entity types
+        if entity_type == "DUE_DATE":
+            # Boost confidence significantly when due date keywords are present
+            due_keywords = ["due", "deadline", "by", "until", "before", "today", "tomorrow", "next", "this"]
+            keyword_in_text = any(word in full_text.lower() for word in due_keywords)
+            if keyword_in_text:
+                base_confidence += 0.25  # Significant boost for due date patterns
+
+            # Additional boost for clear time references
+            if any(word in value.lower() for word in ["today", "tomorrow", "next", "this", "week", "month"]):
+                base_confidence += 0.15
+
+        # Special handling for PRIORITY to prioritize over other entity types
+        if entity_type == "PRIORITY":
+            # Boost confidence significantly when priority keywords are present
+            priority_keywords = ["priority", "urgent", "important", "critical", "high", "low", "medium", "normal"]
+            keyword_in_text = any(word in full_text.lower() for word in priority_keywords)
+            if keyword_in_text:
+                base_confidence += 0.25  # Significant boost for priority patterns
+
+            # Additional boost for clear priority words
+            if any(word in value.lower() for word in ["urgent", "critical", "high", "medium", "low", "normal"]):
+                base_confidence += 0.15
 
         # Validate entity value
         if entity_type == "ASSIGNEE" and "@" in value:
