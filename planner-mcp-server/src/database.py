@@ -528,3 +528,81 @@ class Database:
         except Exception as e:
             logger.error("Error getting task by graph ID", graph_id=graph_id, error=str(e))
             raise DatabaseError(f"Task retrieval failed: {str(e)}")
+
+    async def execute(self, query: str, parameters: dict = None) -> None:
+        """Execute raw SQL with parameters (for webhook operations)"""
+        try:
+            async with self.session_factory() as session:
+                from sqlalchemy import text
+                import json
+
+                # Serialize dict/list parameters to JSON for SQLite compatibility
+                if parameters:
+                    serialized_params = {}
+                    for key, value in parameters.items():
+                        if isinstance(value, (dict, list)):
+                            serialized_params[key] = json.dumps(value, default=str)
+                        else:
+                            serialized_params[key] = value
+                else:
+                    serialized_params = {}
+
+                sql = text(query)
+                await session.execute(sql, serialized_params)
+                await session.commit()
+        except Exception as e:
+            logger.error("Raw SQL execution failed", error=str(e), query=query[:100])
+            raise DatabaseError(f"SQL execution failed: {str(e)}")
+
+    async def fetch_all(self, query: str, parameters: dict = None) -> List[dict]:
+        """Fetch all rows from raw SQL query (for webhook operations)"""
+        try:
+            async with self.session_factory() as session:
+                from sqlalchemy import text
+                import json
+
+                sql = text(query)
+                result = await session.execute(sql, parameters or {})
+                rows = result.fetchall()
+
+                # Convert to list of dictionaries
+                if rows:
+                    # Get column names from the result
+                    columns = result.keys()
+                    raw_rows = [dict(zip(columns, row)) for row in rows]
+
+                    # Deserialize JSON fields (for fields that might contain JSON)
+                    processed_rows = []
+                    for row in raw_rows:
+                        processed_row = {}
+                        for key, value in row.items():
+                            if isinstance(value, str) and key in ['subscription_data', 'metadata']:
+                                try:
+                                    processed_row[key] = json.loads(value)
+                                except (json.JSONDecodeError, TypeError):
+                                    processed_row[key] = value
+                            else:
+                                processed_row[key] = value
+                        processed_rows.append(processed_row)
+                    return processed_rows
+                return []
+        except Exception as e:
+            logger.error("Raw SQL fetch failed", error=str(e), query=query[:100])
+            raise DatabaseError(f"SQL fetch failed: {str(e)}")
+
+    async def fetch_one(self, query: str, parameters: dict = None) -> Optional[dict]:
+        """Fetch one row from raw SQL query (for webhook operations)"""
+        try:
+            async with self.session_factory() as session:
+                from sqlalchemy import text
+                sql = text(query)
+                result = await session.execute(sql, parameters or {})
+                row = result.fetchone()
+
+                if row:
+                    columns = result.keys()
+                    return dict(zip(columns, row))
+                return None
+        except Exception as e:
+            logger.error("Raw SQL fetch one failed", error=str(e), query=query[:100])
+            raise DatabaseError(f"SQL fetch one failed: {str(e)}")

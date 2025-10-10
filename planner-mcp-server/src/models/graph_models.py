@@ -4,7 +4,7 @@ Story 2.1: Advanced Graph API models for batch operations, delta queries, etc.
 """
 
 from typing import Dict, List, Any, Optional, Union
-from datetime import datetime
+from datetime import datetime, timezone
 from dataclasses import dataclass, field
 from enum import Enum
 import uuid
@@ -62,7 +62,7 @@ class BatchRequest:
     user_id: str
     tenant_id: Optional[str] = None
     status: BatchRequestStatus = BatchRequestStatus.PENDING
-    created_at: datetime = field(default_factory=datetime.utcnow)
+    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     completed_at: Optional[datetime] = None
     total_operations: int = field(init=False)
     successful_operations: int = 0
@@ -103,7 +103,7 @@ class BatchRequest:
         if self.is_complete():
             self.status = BatchRequestStatus.COMPLETED
             if not self.completed_at:
-                self.completed_at = datetime.utcnow()
+                self.completed_at = datetime.now(timezone.utc)
 
 
 @dataclass
@@ -132,7 +132,7 @@ class DeltaToken:
     token: str
     user_id: str
     tenant_id: Optional[str] = None
-    created_at: datetime = field(default_factory=datetime.utcnow)
+    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     last_used: Optional[datetime] = None
     expires_at: Optional[datetime] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
@@ -141,11 +141,11 @@ class DeltaToken:
         """Check if token is expired"""
         if not self.expires_at:
             return False
-        return datetime.utcnow() > self.expires_at
+        return datetime.now(timezone.utc) > self.expires_at
 
     def update_last_used(self) -> None:
         """Update last used timestamp"""
-        self.last_used = datetime.utcnow()
+        self.last_used = datetime.now(timezone.utc)
 
 
 @dataclass
@@ -191,7 +191,7 @@ class WebhookSubscription:
     application_id: Optional[str] = None
     user_id: Optional[str] = None
     tenant_id: Optional[str] = None
-    created_at: datetime = field(default_factory=datetime.utcnow)
+    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     last_notification: Optional[datetime] = None
     notification_count: int = 0
     metadata: Dict[str, Any] = field(default_factory=dict)
@@ -200,19 +200,19 @@ class WebhookSubscription:
         """Check if subscription is expired"""
         if not self.expiration_date_time:
             return False
-        return datetime.utcnow() > self.expiration_date_time
+        return datetime.now(timezone.utc) > self.expiration_date_time
 
     def needs_renewal(self, buffer_hours: int = 24) -> bool:
         """Check if subscription needs renewal within buffer time"""
         if not self.expiration_date_time:
             return False
-        buffer_time = datetime.utcnow().timestamp() + (buffer_hours * 3600)
+        buffer_time = datetime.now(timezone.utc).timestamp() + (buffer_hours * 3600)
         return self.expiration_date_time.timestamp() < buffer_time
 
     def update_notification_stats(self) -> None:
         """Update notification statistics"""
         self.notification_count += 1
-        self.last_notification = datetime.utcnow()
+        self.last_notification = datetime.now(timezone.utc)
 
 
 @dataclass
@@ -242,7 +242,7 @@ class TenantContext:
     scopes: List[str] = field(default_factory=list)
     configuration: Dict[str, Any] = field(default_factory=dict)
     enabled: bool = True
-    created_at: datetime = field(default_factory=datetime.utcnow)
+    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     last_used: Optional[datetime] = None
     usage_count: int = 0
     rate_limit_config: Dict[str, Any] = field(default_factory=dict)
@@ -250,7 +250,7 @@ class TenantContext:
     def update_usage(self) -> None:
         """Update usage statistics"""
         self.usage_count += 1
-        self.last_used = datetime.utcnow()
+        self.last_used = datetime.now(timezone.utc)
 
 
 @dataclass
@@ -305,7 +305,7 @@ class RateLimitInfo:
         """Get seconds until rate limit resets"""
         if not self.reset_time:
             return None
-        return max(0, (self.reset_time - datetime.utcnow()).total_seconds())
+        return max(0, (self.reset_time - datetime.now(timezone.utc)).total_seconds())
 
 
 @dataclass

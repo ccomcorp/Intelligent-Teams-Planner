@@ -582,12 +582,13 @@ class DeltaQueryManager:
                 )
 
             except Exception as e:
-                if attempt == self.config.retry_attempts - 1:
-                    raise
-
                 logger.warning(
                     "Delta query attempt failed, retrying", attempt=attempt + 1, error=str(e)
                 )
+
+                if attempt == self.config.retry_attempts - 1:
+                    raise
+
                 await asyncio.sleep(self.config.retry_delay_seconds * (attempt + 1))
 
     async def _perform_full_sync(

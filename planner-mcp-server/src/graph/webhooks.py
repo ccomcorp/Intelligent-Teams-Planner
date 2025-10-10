@@ -17,6 +17,7 @@ import structlog
 
 from fastapi import FastAPI, Request, HTTPException, BackgroundTasks, status
 from fastapi.responses import PlainTextResponse
+from pydantic import BaseModel
 import httpx
 
 from ..models.graph_models import (
@@ -28,6 +29,17 @@ from ..database import Database
 from ..cache import CacheService
 
 logger = structlog.get_logger(__name__)
+
+
+class CreateSubscriptionRequest(BaseModel):
+    """Request model for creating webhook subscriptions"""
+    resource: str
+    change_types: List[str]
+    user_id: str
+    tenant_id: Optional[str] = None
+    client_state: Optional[str] = None
+    include_resource_data: bool = False
+    expiration_hours: int = 168
 
 
 class WebhookValidationError(Exception):
@@ -143,20 +155,29 @@ class WebhookSubscriptionManager:
             WebhookSubscription: Created subscription
         """
         try:
-            if not self.webhook_base_url:
+            # Re-read environment variables for dynamic testing, fall back to instance variables only if not set
+            current_webhook_base_url = os.getenv("WEBHOOK_BASE_URL")
+            if current_webhook_base_url is None:
+                current_webhook_base_url = self.webhook_base_url
+
+            current_webhook_secret = os.getenv("WEBHOOK_SECRET")
+            if current_webhook_secret is None:
+                current_webhook_secret = self.webhook_secret
+
+            if not current_webhook_base_url:
                 raise ValueError("WEBHOOK_BASE_URL must be configured")
 
-            if not self.webhook_secret:
+            if not current_webhook_secret:
                 raise ValueError("WEBHOOK_SECRET must be configured")
 
             # Generate subscription ID
             subscription_id = str(uuid.uuid4())
 
             # Calculate expiration
-            expiration_date = datetime.utcnow() + timedelta(hours=expiration_hours)
+            expiration_date = datetime.now(timezone.utc) + timedelta(hours=expiration_hours)
 
             # Create notification URL with tenant isolation
-            notification_url = self._build_notification_url(tenant_id)
+            notification_url = self._build_notification_url(tenant_id, current_webhook_base_url)
 
             # Generate client state if not provided
             if not client_state:
@@ -353,8 +374,8 @@ class WebhookSubscriptionManager:
                 if not subscription:
                     raise ValueError(f"Subscription {subscription_id} not found")
 
-            # Calculate new expiration
-            new_expiration = datetime.utcnow() + timedelta(hours=extension_hours)
+            # Calculate new expiration - extend from current time (Microsoft Graph behavior)
+            new_expiration = datetime.now(timezone.utc) + timedelta(hours=extension_hours)
 
             # Renew with Microsoft Graph
             if self.graph_client:
@@ -498,18 +519,19 @@ class WebhookSubscriptionManager:
 
     # Private methods
 
-    def _build_notification_url(self, tenant_id: Optional[str]) -> str:
+    def _build_notification_url(self, tenant_id: Optional[str], webhook_base_url: Optional[str] = None) -> str:
         """Build notification URL with tenant isolation"""
+        base_url = webhook_base_url or self.webhook_base_url
         if tenant_id:
-            return urljoin(self.webhook_base_url, f"/tenant/{tenant_id}")
-        return urljoin(self.webhook_base_url, "/default")
+            return urljoin(base_url, f"/tenant/{tenant_id}")
+        return urljoin(base_url, "/default")
 
     def _generate_client_state(self, user_id: str, tenant_id: Optional[str]) -> str:
         """Generate client state for validation"""
         state_data = {
             "user_id": user_id,
             "tenant_id": tenant_id,
-            "timestamp": datetime.utcnow().isoformat()
+            "timestamp": datetime.now(timezone.utc).isoformat()
         }
         return json.dumps(state_data)
 
@@ -826,13 +848,16 @@ class WebhookSubscriptionManager:
         try:
             query = """
             SELECT subscription_data FROM webhook_subscriptions
-            WHERE expiration_date_time > NOW()
+            WHERE expiration_date_time > CURRENT_TIMESTAMP
             """
 
             rows = await self.database.fetch_all(query)
 
             for row in rows:
                 subscription_data = row["subscription_data"]
+                # Deserialize JSON string to dictionary if needed
+                if isinstance(subscription_data, str):
+                    subscription_data = json.loads(subscription_data)
                 subscription = WebhookSubscription(**subscription_data)
                 self.subscriptions[subscription.id] = subscription
 
@@ -856,6 +881,9 @@ class WebhookSubscriptionManager:
 
             if row:
                 subscription_data = row["subscription_data"]
+                # Deserialize JSON string to dictionary if needed
+                if isinstance(subscription_data, str):
+                    subscription_data = json.loads(subscription_data)
                 return WebhookSubscription(**subscription_data)
 
             return None
@@ -873,27 +901,36 @@ class WebhookSubscriptionManager:
         try:
             query = """
             INSERT INTO webhook_subscriptions (
-                subscription_id, tenant_id, user_id, resource,
-                expiration_date_time, subscription_data, created_at, updated_at
+                id, subscription_id, tenant_id, user_id, resource, notification_url,
+                change_types, client_state, expiration_date_time, include_resource_data,
+                notification_count, subscription_data, created_at, updated_at
             ) VALUES (
-                :subscription_id, :tenant_id, :user_id, :resource,
-                :expiration_date_time, :subscription_data, :created_at, :updated_at
+                :id, :subscription_id, :tenant_id, :user_id, :resource, :notification_url,
+                :change_types, :client_state, :expiration_date_time, :include_resource_data,
+                :notification_count, :subscription_data, :created_at, :updated_at
             )
             ON CONFLICT (subscription_id) DO UPDATE SET
                 expiration_date_time = EXCLUDED.expiration_date_time,
                 subscription_data = EXCLUDED.subscription_data,
-                updated_at = EXCLUDED.updated_at
+                updated_at = EXCLUDED.updated_at,
+                notification_count = EXCLUDED.notification_count
             """
 
             await self.database.execute(query, {
+                "id": str(uuid.uuid4()),  # Generate UUID for primary key
                 "subscription_id": subscription.id,
                 "tenant_id": subscription.tenant_id,
                 "user_id": subscription.user_id,
                 "resource": subscription.resource,
+                "notification_url": subscription.notification_url,
+                "change_types": subscription.change_types,
+                "client_state": subscription.client_state,
                 "expiration_date_time": subscription.expiration_date_time,
+                "include_resource_data": subscription.include_resource_data,
+                "notification_count": subscription.notification_count,
                 "subscription_data": asdict(subscription),
                 "created_at": subscription.created_at,
-                "updated_at": datetime.utcnow()
+                "updated_at": datetime.now(timezone.utc)
             })
 
         except Exception as e:
@@ -1000,23 +1037,17 @@ def create_webhook_router(webhook_manager: WebhookSubscriptionManager) -> Any:
 
     @router.post("/subscriptions")
     async def create_subscription_endpoint(
-        resource: str,
-        change_types: List[str],
-        user_id: str,
-        tenant_id: Optional[str] = None,
-        client_state: Optional[str] = None,
-        include_resource_data: bool = False,
-        expiration_hours: int = 168
+        request: CreateSubscriptionRequest
     ):
         """Create new webhook subscription"""
         subscription = await webhook_manager.create_subscription(
-            resource=resource,
-            change_types=change_types,
-            user_id=user_id,
-            tenant_id=tenant_id,
-            client_state=client_state,
-            include_resource_data=include_resource_data,
-            expiration_hours=expiration_hours
+            resource=request.resource,
+            change_types=request.change_types,
+            user_id=request.user_id,
+            tenant_id=request.tenant_id,
+            client_state=request.client_state,
+            include_resource_data=request.include_resource_data,
+            expiration_hours=request.expiration_hours
         )
         return asdict(subscription)
 

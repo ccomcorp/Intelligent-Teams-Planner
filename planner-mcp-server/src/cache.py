@@ -387,3 +387,140 @@ class CacheService:
                 "limit": limit,
                 "error": str(e)
             }
+
+    # Redis list operations for notification queues
+    async def lpush(self, key: str, value: Any, namespace: str = "itp") -> int:
+        """Push value to the left (head) of the list"""
+        try:
+            full_key = f"{namespace}:{key}"
+
+            # Serialize value to JSON if needed
+            if isinstance(value, (dict, list)):
+                serialized_value = json.dumps(value, default=str)
+            elif isinstance(value, datetime):
+                serialized_value = value.isoformat()
+            else:
+                serialized_value = str(value)
+
+            return await self.redis_client.lpush(full_key, serialized_value)
+
+        except Exception as e:
+            logger.error("Error pushing to list", key=key, error=str(e))
+            return 0
+
+    async def rpush(self, key: str, value: Any, namespace: str = "itp") -> int:
+        """Push value to the right (tail) of the list"""
+        try:
+            full_key = f"{namespace}:{key}"
+
+            # Serialize value to JSON if needed
+            if isinstance(value, (dict, list)):
+                serialized_value = json.dumps(value, default=str)
+            elif isinstance(value, datetime):
+                serialized_value = value.isoformat()
+            else:
+                serialized_value = str(value)
+
+            return await self.redis_client.rpush(full_key, serialized_value)
+
+        except Exception as e:
+            logger.error("Error pushing to list", key=key, error=str(e))
+            return 0
+
+    async def lpop(self, key: str, namespace: str = "itp") -> Any:
+        """Pop value from the left (head) of the list"""
+        try:
+            full_key = f"{namespace}:{key}"
+            value = await self.redis_client.lpop(full_key)
+
+            if value is None:
+                return None
+
+            # Try to deserialize JSON
+            try:
+                return json.loads(value)
+            except json.JSONDecodeError:
+                return value
+
+        except Exception as e:
+            logger.error("Error popping from list", key=key, error=str(e))
+            return None
+
+    async def rpop(self, key: str, namespace: str = "itp") -> Any:
+        """Pop value from the right (tail) of the list"""
+        try:
+            full_key = f"{namespace}:{key}"
+            value = await self.redis_client.rpop(full_key)
+
+            if value is None:
+                return None
+
+            # Try to deserialize JSON
+            try:
+                return json.loads(value)
+            except json.JSONDecodeError:
+                return value
+
+        except Exception as e:
+            logger.error("Error popping from list", key=key, error=str(e))
+            return None
+
+    async def llen(self, key: str, namespace: str = "itp") -> int:
+        """Get length of the list"""
+        try:
+            full_key = f"{namespace}:{key}"
+            return await self.redis_client.llen(full_key)
+
+        except Exception as e:
+            logger.error("Error getting list length", key=key, error=str(e))
+            return 0
+
+    async def lrange(self, key: str, start: int = 0, end: int = -1, namespace: str = "itp") -> List[Any]:
+        """Get a range of elements from the list"""
+        try:
+            full_key = f"{namespace}:{key}"
+            values = await self.redis_client.lrange(full_key, start, end)
+
+            # Deserialize values
+            result = []
+            for value in values:
+                try:
+                    result.append(json.loads(value))
+                except json.JSONDecodeError:
+                    result.append(value)
+
+            return result
+
+        except Exception as e:
+            logger.error("Error getting list range", key=key, error=str(e))
+            return []
+
+    async def lrem(self, key: str, count: int, value: Any, namespace: str = "itp") -> int:
+        """Remove elements from the list"""
+        try:
+            full_key = f"{namespace}:{key}"
+
+            # Serialize value to match stored format
+            if isinstance(value, (dict, list)):
+                serialized_value = json.dumps(value, default=str)
+            elif isinstance(value, datetime):
+                serialized_value = value.isoformat()
+            else:
+                serialized_value = str(value)
+
+            return await self.redis_client.lrem(full_key, count, serialized_value)
+
+        except Exception as e:
+            logger.error("Error removing from list", key=key, error=str(e))
+            return 0
+
+    async def ltrim(self, key: str, start: int, end: int, namespace: str = "itp") -> bool:
+        """Trim list to specified range"""
+        try:
+            full_key = f"{namespace}:{key}"
+            await self.redis_client.ltrim(full_key, start, end)
+            return True
+
+        except Exception as e:
+            logger.error("Error trimming list", key=key, error=str(e))
+            return False

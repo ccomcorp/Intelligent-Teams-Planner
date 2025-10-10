@@ -42,6 +42,7 @@ class MockGraphClient:
         self.responses = {}
         self.error_count = 0
         self.should_fail = False
+        self.persistent_error_count = 0
 
     def set_delta_response(self, url: str, response: Dict[str, Any]) -> None:
         """Set response for specific delta query URL"""
@@ -51,16 +52,29 @@ class MockGraphClient:
         """Enable/disable error mode for testing error handling"""
         self.should_fail = should_fail
 
+    def set_persistent_error_mode(self, error_count: int = 10) -> None:
+        """Enable persistent error mode that fails more than retry limit"""
+        self.should_fail = True
+        self.error_count = 0
+        self.persistent_error_count = error_count
+
     async def get(self, url: str, params: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
         """Mock GET request with real Graph API response format"""
         self.call_count += 1
 
         if self.should_fail:
             self.error_count += 1
-            if self.error_count <= 3:  # Fail first 3 attempts
+            # Handle persistent errors (for fallback testing)
+            if hasattr(self, 'persistent_error_count') and self.persistent_error_count > 0:
+                if self.error_count <= self.persistent_error_count:
+                    raise Exception("Simulated persistent Graph API error")
+                else:
+                    self.should_fail = False  # Reset after persistent failures
+            # Handle normal retry testing (fail 2 times, succeed on 3rd)
+            elif self.error_count <= 2:
                 raise Exception("Simulated Graph API error")
             else:
-                self.should_fail = False  # Reset after 3 failures
+                self.should_fail = False  # Reset after 2 failures
 
         # Build full URL with params for matching
         full_url = url
@@ -77,6 +91,12 @@ class MockGraphClient:
             return self._get_plans_delta_response(params)
         elif "tasks/delta" in url:
             return self._get_tasks_delta_response(params)
+        elif "plans" in url:
+            # Full sync for plans
+            return self._get_plans_full_sync_response(params)
+        elif "tasks" in url:
+            # Full sync for tasks
+            return self._get_tasks_full_sync_response(params)
         else:
             return {"value": [], "@odata.deltaLink": f"{url}?$deltatoken=new_token_123"}
 
@@ -141,6 +161,35 @@ class MockGraphClient:
                     {"id": "plan-004", "@removed": {"reason": "deleted"}},
                 ],
             }
+
+    def _get_plans_full_sync_response(self, params: Optional[Dict[str, str]]) -> Dict[str, Any]:
+        """Generate full sync response for plans (same as initial delta sync)"""
+        return {
+            "@odata.context": "https://graph.microsoft.com/v1.0/$metadata#planner/plans",
+            "@odata.deltaLink": "https://graph.microsoft.com/v1.0/planner/plans/delta?$deltatoken=full_sync_token_abc123",
+            "value": [
+                {
+                    "id": "plan-001",
+                    "title": "Product Development Q4",
+                    "description": "Quarterly product development planning",
+                    "owner": "user-001",
+                    "createdDateTime": "2024-01-15T09:00:00Z",
+                    "lastModifiedDateTime": "2024-01-15T09:00:00Z",
+                    "container": {"containerId": "group-001", "type": "group"},
+                    "@odata.etag": 'W/"plan-001-v1"',
+                },
+                {
+                    "id": "plan-002",
+                    "title": "Marketing Campaign 2024",
+                    "description": "Annual marketing campaign coordination",
+                    "owner": "user-002",
+                    "createdDateTime": "2024-01-20T10:30:00Z",
+                    "lastModifiedDateTime": "2024-01-20T10:30:00Z",
+                    "container": {"containerId": "group-002", "type": "group"},
+                    "@odata.etag": 'W/"plan-002-v1"',
+                },
+            ],
+        }
 
     def _get_tasks_delta_response(self, params: Optional[Dict[str, str]]) -> Dict[str, Any]:
         """Generate real tasks delta response"""
@@ -227,6 +276,48 @@ class MockGraphClient:
                 ],
             }
 
+    def _get_tasks_full_sync_response(self, params: Optional[Dict[str, str]]) -> Dict[str, Any]:
+        """Generate full sync response for tasks (same as initial delta sync)"""
+        return {
+            "@odata.context": "https://graph.microsoft.com/v1.0/$metadata#planner/tasks",
+            "@odata.deltaLink": "https://graph.microsoft.com/v1.0/planner/tasks/delta?$deltatoken=task_full_sync_xyz789",
+            "value": [
+                {
+                    "id": "task-001",
+                    "title": "Design UI Components",
+                    "description": "Create reusable UI components for the application",
+                    "planId": "plan-001",
+                    "bucketId": "bucket-001",
+                    "priority": 5,
+                    "percentComplete": 25,
+                    "startDateTime": "2024-01-16T09:00:00Z",
+                    "dueDateTime": "2024-02-15T17:00:00Z",
+                    "createdDateTime": "2024-01-16T09:00:00Z",
+                    "lastModifiedDateTime": "2024-01-20T14:30:00Z",
+                    "assignments": {"user-001": {"assignedDateTime": "2024-01-16T09:00:00Z"}},
+                    "@odata.etag": 'W/"task-001-v2"',
+                },
+                {
+                    "id": "task-002",
+                    "title": "API Integration Testing",
+                    "description": "Test all API endpoints and integration points",
+                    "planId": "plan-001",
+                    "bucketId": "bucket-002",
+                    "priority": 8,
+                    "percentComplete": 0,
+                    "startDateTime": "2024-02-01T09:00:00Z",
+                    "dueDateTime": "2024-02-28T17:00:00Z",
+                    "createdDateTime": "2024-01-18T10:15:00Z",
+                    "lastModifiedDateTime": "2024-01-18T10:15:00Z",
+                    "assignments": {
+                        "user-002": {"assignedDateTime": "2024-01-18T10:15:00Z"},
+                        "user-003": {"assignedDateTime": "2024-01-18T10:15:00Z"},
+                    },
+                    "@odata.etag": 'W/"task-002-v1"',
+                },
+            ],
+        }
+
 
 class MockDatabase:
     """Mock database that simulates real database operations"""
@@ -285,7 +376,7 @@ def test_config():
         sync_interval_seconds=60,
         fallback_threshold=3,
         max_page_size=100,
-        retry_attempts=2,
+        retry_attempts=3,
         retry_delay_seconds=0.1,
         max_concurrent_syncs=2,
     )
@@ -569,9 +660,9 @@ class TestDeltaQueryManager:
     @pytest.mark.asyncio
     async def test_fallback_to_full_sync(self, delta_manager, mock_graph_client, mock_database):
         """Test fallback to full sync after error threshold"""
-        # Force multiple failures to trigger fallback
+        # Force multiple failures to trigger fallback (using persistent errors that exceed retry limit)
         for _ in range(delta_manager.config.fallback_threshold + 1):
-            mock_graph_client.set_error_mode(True)
+            mock_graph_client.set_persistent_error_mode(10)  # Fail more than retry_attempts (3)
             try:
                 await delta_manager.sync_resource_changes(
                     resource_type="plans", user_id="user-001", tenant_id="tenant-001"
@@ -784,10 +875,10 @@ class TestRealWorldScenarios:
         self, delta_manager, mock_graph_client, mock_database
     ):
         """Test recovery from network interruptions"""
-        # Simulate network interruption
-        mock_graph_client.set_error_mode(True)
+        # Simulate network interruption that persists beyond retry limit
+        mock_graph_client.set_persistent_error_mode(5)  # Fail more than retry_attempts (3)
 
-        # First attempt should fail
+        # First attempt should fail after all retry attempts are exhausted
         with pytest.raises(Exception):
             await delta_manager.sync_resource_changes(
                 resource_type="plans", user_id="network-test-user", tenant_id="network-test-tenant"

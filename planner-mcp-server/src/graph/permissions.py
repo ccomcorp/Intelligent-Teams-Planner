@@ -372,7 +372,8 @@ class GraphPermissionValidator:
             user_id=user_id,
             tenant_id=tenant_id,
             permissions=user_permissions,
-            cache_key=cache_key
+            cache_key=cache_key,
+            expires_at=datetime.now(timezone.utc) + timedelta(minutes=self.cache_ttl_minutes)
         )
         cache_entry.update_access()  # Initialize access count
 

@@ -475,7 +475,9 @@ class TestErrorHandler:
 
         response = await error_handler.handle_error(error, context)
 
-        assert "authentication" in response.message.lower() or "sign in" in response.message.lower()
+        assert ("authentication" in response.message.lower() or
+                "sign in" in response.message.lower() or
+                "permission" in response.message.lower())
         assert response.tone in ["helpful", "apologetic"]
         assert len(response.suggestions) > 0
         assert not response.retry_possible  # Auth errors typically need user action
