@@ -105,9 +105,21 @@ docker compose logs -f
 ├── planner-mcp-server/  # Core MCP server
 ├── mcpo-proxy/          # OpenWebUI integration proxy
 ├── openwebui/           # OpenWebUI configuration
+├── rag-service/         # Document processing and vector search
 ├── database/            # Database schemas and migrations
-├── docs/                # Documentation
+├── epics/               # Active feature epics and stories
+├── epics-archive/       # Completed or archived epics
+├── docs/                # Organized documentation
+│   ├── guides/          # Configuration and setup guides
+│   ├── reports/         # Status and analysis reports
+│   ├── implementation/  # Implementation details and conventions
+│   └── status/          # Current project status files
 ├── scripts/             # Development and deployment scripts
+│   ├── deployment/      # Deployment automation
+│   ├── setup/           # Environment setup scripts
+│   └── validation/      # Testing and validation scripts
+├── tests/               # Test files and integration tests
+├── monitoring/          # Grafana and monitoring configuration
 └── archive/             # Previous implementations
 ```
 
@@ -225,10 +237,27 @@ curl http://localhost:3978/api/messages  # Teams Bot
 
 ## Documentation
 
+### Project Documentation
 - [Product Requirements](docs/prd-mvp.md)
 - [Architecture Documentation](docs/v2/architecture.md)
-- [API Reference](docs/v2/api-reference.md)
-- [Deployment Guide](docs/v2/deployment.md)
+
+### Implementation Guides
+- [Package Management Guide](docs/implementation/PACKAGE_MANAGEMENT_COMPLETE.md)
+- [UV Implementation Guide](docs/implementation/UV_IMPLEMENTATION_COMPLETE.md)
+- [Epic Naming Conventions](docs/implementation/EPIC-NAMING-CONVENTION-UPDATE.md)
+
+### Configuration Guides
+- [Development Roadmap](docs/guides/DEVELOPMENT-ROADMAP.md)
+- [Port Configuration](docs/guides/PORT-CONFIGURATION.md)
+
+### Status Reports
+- [Project Status Summary](docs/status/PROJECT-STATUS-SUMMARY.md)
+- [Latest Updates](docs/status/UPDATES-2025-01-10.md)
+
+### Analysis Reports
+- [Comprehensive Project Review](docs/reports/COMPREHENSIVE-PROJECT-REVIEW-2025-01-10.md)
+- [Testing Results](docs/reports/REAL-TESTING-RESULTS.md)
+- [Logical Progression Analysis](docs/reports/LOGICAL-PROGRESSION-ANALYSIS.md)
 
 ## License
 

@@ -1,0 +1,300 @@
+{
+  "$schema": "https://developer.microsoft.com/en-us/json-schemas/teams/v1.16/MicrosoftTeams.schema.json",
+  "manifestVersion": "1.16",
+  "version": "2.0.0",
+  "id": "{{BOT_ID}}",
+  "packageName": "com.ccomgroup.intelligent-teams-planner",
+  "developer": {
+    "name": "CCOM Group Inc",
+    "websiteUrl": "https://www.ccomgroup.com",
+    "privacyUrl": "https://www.ccomgroup.com/privacy",
+    "termsOfUseUrl": "https://www.ccomgroup.com/terms"
+  },
+  "icons": {
+    "color": "color.png",
+    "outline": "outline.png"
+  },
+  "name": {
+    "short": "Intelligent Teams Planner",
+    "full": "Intelligent Teams Planner - AI-Powered Microsoft Planner Assistant"
+  },
+  "description": {
+    "short": "AI assistant for Microsoft Planner with natural language task management",
+    "full": "Intelligent Teams Planner is an AI-powered assistant that helps you manage Microsoft Planner tasks using natural language. Create plans, add tasks, set priorities, assign team members, and get intelligent insights about your project progress."
+  },
+  "accentColor": "#0078D4",
+  "bots": [
+    {
+      "botId": "{{BOT_ID}}",
+      "scopes": [
+        "personal",
+        "team",
+        "groupchat"
+      ],
+      "commandLists": [
+        {
+          "scopes": [
+            "personal",
+            "team",
+            "groupchat"
+          ],
+          "commands": [
+            {
+              "title": "Help",
+              "description": "Get help with Intelligent Teams Planner commands"
+            },
+            {
+              "title": "Reset",
+              "description": "Reset conversation context"
+            },
+            {
+              "title": "Create Plan",
+              "description": "Create a new Microsoft Planner plan"
+            },
+            {
+              "title": "Add Task",
+              "description": "Add a new task to a plan"
+            },
+            {
+              "title": "Show Tasks",
+              "description": "Display tasks with status and assignments"
+            },
+            {
+              "title": "Assign Task",
+              "description": "Assign a task to team members"
+            }
+          ]
+        }
+      ],
+      "supportsFiles": true,
+      "supportsCalling": false,
+      "supportsVideo": false
+    }
+  ],
+  "composeExtensions": [
+    {
+      "botId": "{{BOT_ID}}",
+      "commands": [
+        {
+          "id": "createTask",
+          "type": "action",
+          "title": "Create Task",
+          "description": "Create a new Planner task with details",
+          "context": [
+            "compose",
+            "message"
+          ],
+          "parameters": [
+            {
+              "name": "title",
+              "title": "Task Title",
+              "description": "Enter the task title",
+              "inputType": "text"
+            },
+            {
+              "name": "description",
+              "title": "Description",
+              "description": "Enter task description",
+              "inputType": "textarea"
+            },
+            {
+              "name": "priority",
+              "title": "Priority",
+              "description": "Select task priority",
+              "inputType": "choiceset",
+              "choices": [
+                {
+                  "title": "Low",
+                  "value": "low"
+                },
+                {
+                  "title": "Medium",
+                  "value": "medium"
+                },
+                {
+                  "title": "High",
+                  "value": "high"
+                },
+                {
+                  "title": "Urgent",
+                  "value": "urgent"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "searchTasks",
+          "type": "query",
+          "title": "Search Tasks",
+          "description": "Search for tasks across all plans",
+          "context": [
+            "compose",
+            "message"
+          ],
+          "parameters": [
+            {
+              "name": "searchQuery",
+              "title": "Search Query",
+              "description": "Enter search terms",
+              "inputType": "text"
+            }
+          ]
+        },
+        {
+          "id": "taskStatus",
+          "type": "action",
+          "title": "Task Status",
+          "description": "View and update task status",
+          "context": [
+            "compose",
+            "message"
+          ]
+        }
+      ],
+      "messageHandlers": [
+        {
+          "type": "link",
+          "value": {
+            "domains": [
+              "tasks.office.com",
+              "planner.office.com"
+            ]
+          }
+        }
+      ]
+    }
+  ],
+  "staticTabs": [
+    {
+      "entityId": "dashboard",
+      "name": "Dashboard",
+      "contentUrl": "https://{{DOMAIN}}/tabs/dashboard",
+      "websiteUrl": "https://{{DOMAIN}}/tabs/dashboard",
+      "scopes": [
+        "personal"
+      ]
+    },
+    {
+      "entityId": "tasks",
+      "name": "My Tasks",
+      "contentUrl": "https://{{DOMAIN}}/tabs/tasks",
+      "websiteUrl": "https://{{DOMAIN}}/tabs/tasks",
+      "scopes": [
+        "personal"
+      ]
+    }
+  ],
+  "configurableTabs": [
+    {
+      "configurationUrl": "https://{{DOMAIN}}/tabs/config",
+      "scopes": [
+        "team",
+        "groupchat"
+      ],
+      "context": [
+        "channelTab",
+        "privateChatTab",
+        "meetingChatTab",
+        "meetingDetailsTab"
+      ]
+    }
+  ],
+  "permissions": [
+    "identity",
+    "messageTeamMembers"
+  ],
+  "validDomains": [
+    "{{DOMAIN}}",
+    "tasks.office.com",
+    "planner.office.com",
+    "graph.microsoft.com"
+  ],
+  "webApplicationInfo": {
+    "id": "{{BOT_ID}}",
+    "resource": "https://graph.microsoft.com"
+  },
+  "authorization": {
+    "permissions": {
+      "resourceSpecific": [
+        {
+          "name": "ChannelMessage.Read.Group",
+          "type": "Application"
+        },
+        {
+          "name": "Channel.Create.Group",
+          "type": "Application"
+        },
+        {
+          "name": "Channel.Delete.Group",
+          "type": "Application"
+        },
+        {
+          "name": "ChannelTab.Read.Group",
+          "type": "Application"
+        },
+        {
+          "name": "ChannelTab.Create.Group",
+          "type": "Application"
+        },
+        {
+          "name": "ChannelTab.Delete.Group",
+          "type": "Application"
+        },
+        {
+          "name": "Member.Read.Group",
+          "type": "Application"
+        },
+        {
+          "name": "Owner.Read.Group",
+          "type": "Application"
+        },
+        {
+          "name": "File.Read.Group",
+          "type": "Application"
+        },
+        {
+          "name": "TeamsActivity.Send.Group",
+          "type": "Application"
+        }
+      ]
+    }
+  },
+  "activities": {
+    "activityTypes": [
+      {
+        "type": "taskCreated",
+        "description": "A new task has been created",
+        "templateText": "{actor} created task {taskTitle}"
+      },
+      {
+        "type": "taskAssigned",
+        "description": "A task has been assigned",
+        "templateText": "{actor} assigned {taskTitle} to {assignee}"
+      },
+      {
+        "type": "taskCompleted",
+        "description": "A task has been completed",
+        "templateText": "{actor} completed task {taskTitle}"
+      },
+      {
+        "type": "taskOverdue",
+        "description": "A task is overdue",
+        "templateText": "Task {taskTitle} is overdue"
+      },
+      {
+        "type": "planCreated",
+        "description": "A new plan has been created",
+        "templateText": "{actor} created plan {planTitle}"
+      }
+    ]
+  },
+  "defaultGroupCapability": {
+    "team": "tab",
+    "groupchat": "bot",
+    "meetings": "tab"
+  },
+  "supportedChannelTypes": [
+    "sharedChannels"
+  ]
+}

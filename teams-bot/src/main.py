@@ -24,8 +24,14 @@ from datetime import datetime, timezone
 
 try:
     from .attachment_handler import TeamsAttachmentHandler
+    from .mention_handler import MentionHandler
+    from .activity_feed import ActivityFeedManager, ActivityType
+    from .adaptive_cards import AdaptiveCardTemplates
 except ImportError:
     from attachment_handler import TeamsAttachmentHandler
+    from mention_handler import MentionHandler
+    from activity_feed import ActivityFeedManager, ActivityType
+    from adaptive_cards import AdaptiveCardTemplates
 
 # Configure structured logging
 structlog.configure(
@@ -59,7 +65,7 @@ class ConversationContextManager:
     async def close(self):
         """Close Redis connection"""
         if self.redis_client:
-            await self.redis_client.close()
+            await self.redis_client.aclose()
 
     def _get_key(self, channel_id: str, user_id: str) -> str:
         """Generate Redis key for conversation context"""
@@ -267,6 +273,7 @@ class OpenWebUIClient:
 class TeamsBot(ActivityHandler):
     """
     Lightweight Teams bot that forwards conversations to OpenWebUI
+    Enhanced with mentions, adaptive cards, and activity feed integration
     """
 
     def __init__(
@@ -274,11 +281,15 @@ class TeamsBot(ActivityHandler):
         openwebui_client: OpenWebUIClient,
         context_manager: ConversationContextManager,
         attachment_handler: TeamsAttachmentHandler,
+        mention_handler: MentionHandler,
+        activity_feed_manager: ActivityFeedManager,
     ):
         super().__init__()
         self.openwebui_client = openwebui_client
         self.context_manager = context_manager
         self.attachment_handler = attachment_handler
+        self.mention_handler = mention_handler
+        self.activity_feed_manager = activity_feed_manager
         # Keep in-memory fallback for when Redis is unavailable
         self.conversations: Dict[str, str] = {}  # conversation_id mapping
 
@@ -294,56 +305,34 @@ class TeamsBot(ActivityHandler):
                 "attachments": [],
             }
 
-            # Extract mentions
-            if hasattr(activity, "entities") and activity.entities:
-                for entity in activity.entities:
-                    if entity.type == "mention":
-                        mention = {
-                            "id": (
-                                entity.mentioned.id
-                                if hasattr(entity, "mentioned")
-                                else None
-                            ),
-                            "name": (
-                                entity.mentioned.name
-                                if hasattr(entity, "mentioned")
-                                else None
-                            ),
-                            "text": entity.text if hasattr(entity, "text") else None,
-                        }
-                        message_content["mentions"].append(mention)
-                        logger.debug("Extracted mention", mention=mention)
+            # Use enhanced mention processing
+            enhanced_content = await self.mention_handler.process_mentions(
+                turn_context, message_content
+            )
 
-            # Extract attachments
+            # Extract attachments (ensure attachments key exists)
+            if "attachments" not in enhanced_content:
+                enhanced_content["attachments"] = []
+
             if hasattr(activity, "attachments") and activity.attachments:
                 for attachment in activity.attachments:
                     att = {
-                        "content_type": attachment.content_type,
-                        "content_url": attachment.content_url,
-                        "name": attachment.name,
+                        "content_type": getattr(attachment, "content_type", ""),
+                        "content_url": getattr(attachment, "content_url", ""),
+                        "name": getattr(attachment, "name", ""),
                         "thumbnail_url": getattr(attachment, "thumbnail_url", None),
                     }
-                    message_content["attachments"].append(att)
+                    enhanced_content["attachments"].append(att)
                     logger.debug("Extracted attachment", attachment=att)
 
-            # Format text to preserve mentions
-            formatted_text = message_content["text"]
-            for mention in message_content["mentions"]:
-                if mention["text"] and mention["name"]:
-                    # Replace mention text with readable format
-                    formatted_text = formatted_text.replace(
-                        mention["text"], f"@{mention['name']}"
-                    )
-
-            message_content["formatted_text"] = formatted_text
-
             logger.debug(
-                "Formatted message content",
-                has_mentions=len(message_content["mentions"]) > 0,
-                has_attachments=len(message_content["attachments"]) > 0,
+                "Formatted message content with enhanced mentions",
+                has_mentions=len(enhanced_content["mentions"]) > 0,
+                has_attachments=len(enhanced_content["attachments"]) > 0,
+                bot_mentioned=enhanced_content.get("bot_mentioned", False)
             )
 
-            return message_content
+            return enhanced_content
 
         except Exception as e:
             logger.error("Error formatting message content", error=str(e))
@@ -386,12 +375,13 @@ class TeamsBot(ActivityHandler):
 
             # Try to get from Bot Framework authorization header
             # This would typically be set by the Teams client during authentication
-            auth_header = turn_context.adapter.request.headers.get("Authorization")
-            if auth_header and auth_header.startswith("Bearer "):
-                # Extract just the token part
-                token = auth_header[7:]  # Remove 'Bearer ' prefix
-                logger.debug("Extracted token from Authorization header")
-                return token
+            if hasattr(turn_context, 'adapter') and hasattr(turn_context.adapter, 'request'):
+                auth_header = turn_context.adapter.request.headers.get("Authorization")
+                if auth_header and auth_header.startswith("Bearer "):
+                    # Extract just the token part
+                    token = auth_header[7:]  # Remove 'Bearer ' prefix
+                    logger.debug("Extracted token from Authorization header")
+                    return token
 
             logger.debug("No Teams authentication token found in activity context")
             return None
@@ -509,8 +499,30 @@ class TeamsBot(ActivityHandler):
                         final_response,
                     )
 
-                # Send response back to Teams
-                await turn_context.send_activity(MessageFactory.text(final_response))
+                # Check if we should send as adaptive card or text
+                should_use_card = self._should_use_adaptive_card(message_content, response_content)
+
+                if should_use_card:
+                    # Try to parse response for structured data
+                    card_data = self._extract_card_data_from_response(response_content)
+                    if card_data:
+                        card = self._create_response_card(card_data, message_content)
+                        if card:
+                            # Create adaptive card attachment (simplified for this implementation)
+                            card_attachment = MessageFactory.text(f"[Adaptive Card: {card.get('type', 'Card')}]")
+                            await turn_context.send_activity(card_attachment)
+                        else:
+                            await turn_context.send_activity(MessageFactory.text(final_response))
+                    else:
+                        await turn_context.send_activity(MessageFactory.text(final_response))
+                else:
+                    # Send response back to Teams as text
+                    await turn_context.send_activity(MessageFactory.text(final_response))
+
+                # Send activity feed notifications for mentions
+                await self._handle_mention_notifications(
+                    message_content, turn_context, teams_auth_token
+                )
 
             else:
                 # Store error response in context too
@@ -601,6 +613,256 @@ Ready to help manage your Planner tasks! 🚀
         """
         await turn_context.send_activity(MessageFactory.text(help_text))
 
+    def _should_use_adaptive_card(self, message_content: Dict[str, Any], response: str) -> bool:
+        """Determine if response should be sent as adaptive card"""
+        try:
+            # Use adaptive cards for:
+            # 1. Responses to mentions
+            # 2. Task-related responses
+            # 3. Structured data responses
+
+            if message_content.get("bot_mentioned", False):
+                return True
+
+            # Check for task-related keywords in response
+            task_keywords = ["task", "plan", "assigned", "due", "priority", "completed"]
+            response_lower = response.lower()
+
+            if any(keyword in response_lower for keyword in task_keywords):
+                return True
+
+            # Check for structured data indicators
+            if "**" in response or "###" in response or any(
+                line.strip().startswith(("- ", "* ", "1. ", "2. "))
+                for line in response.split("\n")
+            ):
+                return True
+
+            return False
+
+        except Exception as e:
+            logger.error("Error determining card usage", error=str(e))
+            return False
+
+    def _extract_card_data_from_response(self, response: str) -> Optional[Dict[str, Any]]:
+        """Extract structured data from response for card creation"""
+        try:
+            # Simple parsing for common response patterns
+            card_data = {"type": "general", "content": response}
+
+            # Look for task information
+            if "task" in response.lower():
+                card_data["type"] = "task_response"
+
+            # Look for list items
+            lines = response.split("\n")
+            list_items = [
+                line.strip()[2:].strip()
+                for line in lines
+                if line.strip().startswith(("- ", "* "))
+            ]
+
+            if list_items:
+                card_data["list_items"] = list_items
+
+            # Look for key-value pairs (basic parsing)
+            facts = []
+            for line in lines:
+                if ":" in line and not line.strip().startswith("#"):
+                    parts = line.split(":", 1)
+                    if len(parts) == 2:
+                        facts.append({
+                            "title": parts[0].strip(),
+                            "value": parts[1].strip()
+                        })
+
+            if facts:
+                card_data["facts"] = facts
+
+            return card_data
+
+        except Exception as e:
+            logger.error("Error extracting card data", error=str(e))
+            return None
+
+    def _create_response_card(
+        self,
+        card_data: Dict[str, Any],
+        message_content: Dict[str, Any]
+    ) -> Optional[Dict[str, Any]]:
+        """Create adaptive card from response data"""
+        try:
+            card = {
+                "type": "AdaptiveCard",
+                "version": "1.5",
+                "body": []
+            }
+
+            # Add header
+            if message_content.get("bot_mentioned"):
+                card["body"].append({
+                    "type": "TextBlock",
+                    "text": "🤖 **Intelligent Planner Response**",
+                    "size": "medium",
+                    "weight": "bolder",
+                    "color": "accent"
+                })
+
+            # Add main content
+            content = card_data.get("content", "")
+            if content:
+                # Split content into paragraphs
+                paragraphs = [p.strip() for p in content.split("\n\n") if p.strip()]
+
+                for paragraph in paragraphs:
+                    if paragraph:
+                        card["body"].append({
+                            "type": "TextBlock",
+                            "text": paragraph,
+                            "wrap": True,
+                            "spacing": "medium"
+                        })
+
+            # Add facts if available
+            facts = card_data.get("facts")
+            if facts:
+                card["body"].append({
+                    "type": "FactSet",
+                    "facts": facts[:5],  # Limit to 5 facts
+                    "spacing": "medium"
+                })
+
+            # Add list items if available
+            list_items = card_data.get("list_items")
+            if list_items:
+                for item in list_items[:5]:  # Limit to 5 items
+                    card["body"].append({
+                        "type": "TextBlock",
+                        "text": f"• {item}",
+                        "spacing": "small"
+                    })
+
+            # Add action button
+            card["actions"] = [
+                {
+                    "type": "Action.Submit",
+                    "title": "Ask Follow-up",
+                    "data": {
+                        "action": "followUp"
+                    }
+                }
+            ]
+
+            return card
+
+        except Exception as e:
+            logger.error("Error creating response card", error=str(e))
+            return None
+
+    async def _handle_mention_notifications(
+        self,
+        message_content: Dict[str, Any],
+        turn_context: TurnContext,
+        auth_token: Optional[str] = None
+    ) -> None:
+        """Handle notifications for mentioned users"""
+        try:
+            mentions = message_content.get("mentions", [])
+            if not mentions:
+                return
+
+            # Extract task context from mentions
+            task_context = self.mention_handler.extract_task_context_from_mentions(
+                mentions, message_content.get("text", "")
+            )
+
+            # Get conversation details
+            conversation_id = turn_context.activity.conversation.id
+            user_id = turn_context.activity.from_property.id
+            user_name = getattr(turn_context.activity.from_property, "name", "Someone")
+
+            # Send notifications for users who should be notified
+            for mention in mentions:
+                if mention.get("should_notify", False) and mention.get("id"):
+                    try:
+                        # Send activity feed notification
+                        await self.activity_feed_manager.notify_mention_received(
+                            task_id="conversation_mention",  # Use conversation as task context
+                            task_title=f"Conversation in {conversation_id}",
+                            mentioned_user_id=mention["id"],
+                            mentioner_id=user_id,
+                            mentioner_name=user_name,
+                            message=message_content.get("text", "")[:200],  # Truncate message
+                            auth_token=auth_token,
+                            channel_id=conversation_id
+                        )
+
+                        logger.info(
+                            "Sent mention notification",
+                            mentioned_user=mention["id"],
+                            mentioner=user_name
+                        )
+
+                    except Exception as e:
+                        logger.error(
+                            "Error sending mention notification",
+                            error=str(e),
+                            mentioned_user=mention.get("id")
+                        )
+
+        except Exception as e:
+            logger.error("Error handling mention notifications", error=str(e))
+
+    async def on_message_activity_invoke(self, turn_context: TurnContext) -> None:
+        """Handle invoke activities (adaptive card actions)"""
+        try:
+            activity = turn_context.activity
+            if hasattr(activity, "value") and activity.value:
+                action_data = activity.value
+                action = action_data.get("action")
+
+                # Handle mention-related actions
+                if action in ["viewTask", "replyToMention", "retry", "getHelp"]:
+                    response = await self.mention_handler.handle_mention_actions(
+                        action_data, turn_context
+                    )
+                    if response:
+                        await turn_context.send_activity(response)
+
+                # Handle other adaptive card actions
+                elif action == "followUp":
+                    await turn_context.send_activity(
+                        MessageFactory.text("What would you like to know more about?")
+                    )
+
+                elif action in ["viewAllActivities", "refreshActivitySummary"]:
+                    user_id = action_data.get("userId", turn_context.activity.from_property.id)
+                    time_period = action_data.get("timePeriod", "today")
+
+                    # Get authentication token
+                    auth_token = await self._extract_teams_token(turn_context)
+
+                    # Create activity summary card
+                    summary_card = await self.activity_feed_manager.create_activity_summary_card(
+                        user_id, time_period, auth_token
+                    )
+
+                    if summary_card:
+                        # Create adaptive card attachment (simplified for this implementation)
+                        card_attachment = MessageFactory.text(f"[Activity Summary Card: {summary_card.get('type', 'Card')}]")
+                        await turn_context.send_activity(card_attachment)
+
+                else:
+                    await turn_context.send_activity(
+                        MessageFactory.text("Action processed. How can I help you further?")
+                    )
+
+        except Exception as e:
+            logger.error("Error handling invoke activity", error=str(e))
+            await turn_context.send_activity(
+                MessageFactory.text("Sorry, there was an error processing that action.")
+            )
+
 
 def create_app() -> web.Application:
     """Create the web application"""
@@ -646,9 +908,21 @@ def create_app() -> web.Application:
     rag_service_url = os.getenv("RAG_SERVICE_URL", "http://localhost:7120")
     attachment_handler = TeamsAttachmentHandler(rag_service_url)
 
+    # Create mention handler
+    mention_handler = MentionHandler(openwebui_client, context_manager)
+
+    # Create activity feed manager
+    activity_feed_manager = ActivityFeedManager()
+
     # Create bot adapter and bot
     adapter = CloudAdapter(settings)
-    bot = TeamsBot(openwebui_client, context_manager, attachment_handler)
+    bot = TeamsBot(
+        openwebui_client,
+        context_manager,
+        attachment_handler,
+        mention_handler,
+        activity_feed_manager
+    )
 
     async def messages(req: Request) -> Response:
         """Handle bot messages"""
@@ -704,6 +978,7 @@ def create_app() -> web.Application:
         await openwebui_client.close()
         await context_manager.close()
         await attachment_handler.close()
+        await activity_feed_manager.close()
 
     # Create application
     app = web.Application(middlewares=[aiohttp_error_middleware])

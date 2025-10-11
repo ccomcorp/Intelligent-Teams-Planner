@@ -301,6 +301,39 @@ class CreateTask(Tool):
         self.graph_client = graph_client
         self.database = database
 
+    async def _update_task_description(self, task_id: str, description: str, user_id: str) -> None:
+        """Update task description via task details API after creation"""
+        import httpx
+
+        access_token = await self.graph_client.get_access_token(user_id)
+        if not access_token:
+            raise Exception("No valid access token available")
+
+        # Get current task details to get ETag
+        async with httpx.AsyncClient() as client:
+            details_response = await client.get(
+                f"https://graph.microsoft.com/v1.0/planner/tasks/{task_id}/details",
+                headers={"Authorization": f"Bearer {access_token}"}
+            )
+
+            if details_response.status_code == 200:
+                details_data = details_response.json()
+                etag = details_data.get("@odata.etag")
+
+                # Update description
+                update_response = await client.patch(
+                    f"https://graph.microsoft.com/v1.0/planner/tasks/{task_id}/details",
+                    headers={
+                        "Authorization": f"Bearer {access_token}",
+                        "Content-Type": "application/json",
+                        "If-Match": etag
+                    },
+                    json={"description": description}
+                )
+
+                if update_response.status_code not in [200, 204]:
+                    raise Exception(f"Failed to update description: {update_response.status_code}")
+
     def _define_parameters(self) -> Dict[str, Any]:
         return {
             "type": "object",
@@ -315,17 +348,7 @@ class CreateTask(Tool):
                 },
                 "description": {
                     "type": "string",
-                    "description": "Task description"
-                },
-                "due_date": {
-                    "type": "string",
-                    "description": "Due date (ISO 8601 format)"
-                },
-                "priority": {
-                    "type": "integer",
-                    "description": "Priority (1=urgent, 5=medium, 9=low)",
-                    "minimum": 1,
-                    "maximum": 10
+                    "description": "Task description (set after creation via task details)"
                 },
                 "bucket_id": {
                     "type": "string",
@@ -346,20 +369,14 @@ class CreateTask(Tool):
             plan_id = arguments["plan_id"]
             title = arguments["title"]
             description = arguments.get("description", "")
-            due_date = arguments.get("due_date")
-            priority = arguments.get("priority", 5)
             bucket_id = arguments.get("bucket_id")
             assigned_to = arguments.get("assigned_to", [])
 
-            # Prepare task data
+            # Prepare task data (only fields supported during creation)
             task_data = {
                 "planId": plan_id,
-                "title": title,
-                "priority": priority
+                "title": title
             }
-
-            if due_date:
-                task_data["dueDateTime"] = due_date
 
             if bucket_id:
                 task_data["bucketId"] = bucket_id
@@ -378,6 +395,14 @@ class CreateTask(Tool):
             result = await self.graph_client.create_task(task_data, user_id)
 
             if result:
+                task_id = result["id"]
+
+                # Update description if provided (requires separate API call to task details)
+                if description:
+                    try:
+                        await self._update_task_description(task_id, description, user_id)
+                    except Exception as e:
+                        logger.warning("Failed to set task description", error=str(e))
                 # Save to local database
                 await self.database.save_task({
                     "graph_id": result["id"],
@@ -426,6 +451,39 @@ class UpdateTask(Tool):
         self.graph_client = graph_client
         self.database = database
 
+    async def _update_task_description(self, task_id: str, description: str, user_id: str) -> None:
+        """Update task description via task details API"""
+        import httpx
+
+        access_token = await self.graph_client.get_access_token(user_id)
+        if not access_token:
+            raise Exception("No valid access token available")
+
+        # Get current task details to get ETag
+        async with httpx.AsyncClient() as client:
+            details_response = await client.get(
+                f"https://graph.microsoft.com/v1.0/planner/tasks/{task_id}/details",
+                headers={"Authorization": f"Bearer {access_token}"}
+            )
+
+            if details_response.status_code == 200:
+                details_data = details_response.json()
+                etag = details_data.get("@odata.etag")
+
+                # Update description
+                update_response = await client.patch(
+                    f"https://graph.microsoft.com/v1.0/planner/tasks/{task_id}/details",
+                    headers={
+                        "Authorization": f"Bearer {access_token}",
+                        "Content-Type": "application/json",
+                        "If-Match": etag
+                    },
+                    json={"description": description}
+                )
+
+                if update_response.status_code not in [200, 204]:
+                    raise Exception(f"Failed to update description: {update_response.status_code}")
+
     def _define_parameters(self) -> Dict[str, Any]:
         return {
             "type": "object",
@@ -438,6 +496,10 @@ class UpdateTask(Tool):
                     "type": "string",
                     "description": "New task title"
                 },
+                "description": {
+                    "type": "string",
+                    "description": "Task description/notes"
+                },
                 "percent_complete": {
                     "type": "integer",
                     "description": "Completion percentage (0-100)",
@@ -448,11 +510,29 @@ class UpdateTask(Tool):
                     "type": "string",
                     "description": "Due date (ISO 8601 format)"
                 },
+                "start_date": {
+                    "type": "string",
+                    "description": "Start date (ISO 8601 format)"
+                },
                 "priority": {
                     "type": "integer",
-                    "description": "Priority (1=urgent, 5=medium, 9=low)",
-                    "minimum": 1,
+                    "description": "Priority (0-1=urgent, 2-4=important, 5-7=medium, 8-10=low)",
+                    "minimum": 0,
                     "maximum": 10
+                },
+                "bucket_id": {
+                    "type": "string",
+                    "description": "Bucket ID to move task to"
+                },
+                "assigned_to": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "User IDs to assign task to (replaces existing assignments)"
+                },
+                "categories": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Category labels to apply to task"
                 }
             },
             "required": ["task_id"]
@@ -480,8 +560,41 @@ class UpdateTask(Tool):
             if "due_date" in arguments:
                 update_data["dueDateTime"] = arguments["due_date"]
 
+            if "start_date" in arguments:
+                update_data["startDateTime"] = arguments["start_date"]
+
             if "priority" in arguments:
                 update_data["priority"] = arguments["priority"]
+
+            if "bucket_id" in arguments:
+                update_data["bucketId"] = arguments["bucket_id"]
+
+            # Handle assignments
+            if "assigned_to" in arguments:
+                assignments = {}
+                for user_id_assignment in arguments["assigned_to"]:
+                    assignments[user_id_assignment] = {
+                        "@odata.type": "#microsoft.graph.plannerAssignment",
+                        "orderHint": " !"
+                    }
+                update_data["assignments"] = assignments
+
+            # Handle categories
+            if "categories" in arguments:
+                applied_categories = {}
+                for i, category in enumerate(arguments["categories"][:6]):  # Max 6 categories
+                    category_key = f"category{i+1}"
+                    applied_categories[category_key] = True
+                update_data["appliedCategories"] = applied_categories
+
+            # Handle description update (requires separate API call to task details)
+            description_updated = False
+            if "description" in arguments:
+                try:
+                    await self._update_task_description(task_id, arguments["description"], user_id)
+                    description_updated = True
+                except Exception as e:
+                    logger.warning("Failed to update task description", error=str(e))
 
             # Update task via Graph API
             result = await self.graph_client.update_task(task_id, update_data, user_id)
@@ -501,12 +614,38 @@ class UpdateTask(Tool):
                     }
                 })
 
+                # Collect updated fields for response
+                updated_fields = []
+                if "title" in arguments:
+                    updated_fields.append("title")
+                if "percent_complete" in arguments:
+                    updated_fields.append("completion_percentage")
+                if "due_date" in arguments:
+                    updated_fields.append("due_date")
+                if "start_date" in arguments:
+                    updated_fields.append("start_date")
+                if "priority" in arguments:
+                    updated_fields.append("priority")
+                if "bucket_id" in arguments:
+                    updated_fields.append("bucket_assignment")
+                if "assigned_to" in arguments:
+                    updated_fields.append("assignments")
+                if "categories" in arguments:
+                    updated_fields.append("categories")
+                if description_updated:
+                    updated_fields.append("description")
+
                 return ToolResult(
                     success=True,
-                    content=result,
+                    content={
+                        "task": result,
+                        "updated_fields": updated_fields,
+                        "description_updated": description_updated
+                    },
                     metadata={
                         "operation": "update_task",
                         "task_id": task_id,
+                        "updated_fields": updated_fields,
                         "timestamp": datetime.utcnow().isoformat()
                     }
                 )
@@ -1539,6 +1678,1036 @@ class ProcessNaturalLanguage(Tool):
             return []
 
 
+class AddTaskChecklist(Tool):
+    """Add checklist items to a task"""
+
+    def __init__(self, graph_client: GraphAPIClient, database: Database):
+        super().__init__(
+            "add_task_checklist",
+            "Add checklist items to a Microsoft Planner task"
+        )
+        self.graph_client = graph_client
+        self.database = database
+
+    def _define_parameters(self) -> Dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "task_id": {
+                    "type": "string",
+                    "description": "Task ID to add checklist to (required)"
+                },
+                "checklist_items": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "List of checklist item titles (required)"
+                }
+            },
+            "required": ["task_id", "checklist_items"]
+        }
+
+    async def execute(self, arguments: Dict[str, Any], context: Dict[str, Any]) -> ToolResult:
+        try:
+            user_id = context.get("user_id", "default")
+            task_id = arguments["task_id"]
+            checklist_items = arguments["checklist_items"]
+
+            # Get current task details to get ETag
+            import httpx
+            access_token = await self.graph_client.get_access_token(user_id)
+            if not access_token:
+                return ToolResult(success=False, error="No valid access token available")
+
+            async with httpx.AsyncClient() as client:
+                details_response = await client.get(
+                    f"https://graph.microsoft.com/v1.0/planner/tasks/{task_id}/details",
+                    headers={"Authorization": f"Bearer {access_token}"}
+                )
+
+                if details_response.status_code == 200:
+                    details_data = details_response.json()
+                    etag = details_data.get("@odata.etag")
+                    existing_checklist = details_data.get("checklist", {})
+
+                    # Add new checklist items
+                    for item_title in checklist_items:
+                        item_id = f"checklist_item_{len(existing_checklist) + 1}"
+                        existing_checklist[item_id] = {
+                            "@odata.type": "#microsoft.graph.plannerChecklistItem",
+                            "title": item_title,
+                            "isChecked": False
+                        }
+
+                    # Update checklist
+                    update_response = await client.patch(
+                        f"https://graph.microsoft.com/v1.0/planner/tasks/{task_id}/details",
+                        headers={
+                            "Authorization": f"Bearer {access_token}",
+                            "Content-Type": "application/json",
+                            "If-Match": etag
+                        },
+                        json={"checklist": existing_checklist}
+                    )
+
+                    if update_response.status_code in [200, 204]:
+                        return ToolResult(
+                            success=True,
+                            content={
+                                "task_id": task_id,
+                                "added_items": checklist_items,
+                                "total_items": len(existing_checklist)
+                            },
+                            metadata={
+                                "operation": "add_task_checklist",
+                                "task_id": task_id,
+                                "items_added": len(checklist_items),
+                                "timestamp": datetime.utcnow().isoformat()
+                            }
+                        )
+                    else:
+                        return ToolResult(success=False, error=f"Failed to update checklist: {update_response.status_code}")
+                else:
+                    return ToolResult(success=False, error="Task not found")
+
+        except Exception as e:
+            logger.error("Error adding task checklist", error=str(e))
+            return ToolResult(success=False, error=f"Failed to add checklist: {str(e)}")
+
+
+class UpdateTaskChecklist(Tool):
+    """Update checklist item completion status"""
+
+    def __init__(self, graph_client: GraphAPIClient, database: Database):
+        super().__init__(
+            "update_task_checklist",
+            "Update checklist item completion status in a Microsoft Planner task"
+        )
+        self.graph_client = graph_client
+        self.database = database
+
+    def _define_parameters(self) -> Dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "task_id": {
+                    "type": "string",
+                    "description": "Task ID containing the checklist (required)"
+                },
+                "item_index": {
+                    "type": "integer",
+                    "description": "Index of checklist item to update (0-based, required)"
+                },
+                "is_checked": {
+                    "type": "boolean",
+                    "description": "Whether the item is completed (required)"
+                }
+            },
+            "required": ["task_id", "item_index", "is_checked"]
+        }
+
+    async def execute(self, arguments: Dict[str, Any], context: Dict[str, Any]) -> ToolResult:
+        try:
+            user_id = context.get("user_id", "default")
+            task_id = arguments["task_id"]
+            item_index = arguments["item_index"]
+            is_checked = arguments["is_checked"]
+
+            # Get current task details to get ETag and checklist
+            import httpx
+            access_token = await self.graph_client.get_access_token(user_id)
+            if not access_token:
+                return ToolResult(success=False, error="No valid access token available")
+
+            async with httpx.AsyncClient() as client:
+                details_response = await client.get(
+                    f"https://graph.microsoft.com/v1.0/planner/tasks/{task_id}/details",
+                    headers={"Authorization": f"Bearer {access_token}"}
+                )
+
+                if details_response.status_code == 200:
+                    details_data = details_response.json()
+                    etag = details_data.get("@odata.etag")
+                    checklist = details_data.get("checklist", {})
+
+                    # Find the item to update by index
+                    checklist_items = list(checklist.items())
+                    if item_index >= len(checklist_items):
+                        return ToolResult(success=False, error=f"Checklist item index {item_index} not found")
+
+                    item_key, item_data = checklist_items[item_index]
+                    item_data["isChecked"] = is_checked
+
+                    # Update checklist
+                    update_response = await client.patch(
+                        f"https://graph.microsoft.com/v1.0/planner/tasks/{task_id}/details",
+                        headers={
+                            "Authorization": f"Bearer {access_token}",
+                            "Content-Type": "application/json",
+                            "If-Match": etag
+                        },
+                        json={"checklist": checklist}
+                    )
+
+                    if update_response.status_code in [200, 204]:
+                        return ToolResult(
+                            success=True,
+                            content={
+                                "task_id": task_id,
+                                "item_index": item_index,
+                                "item_title": item_data.get("title"),
+                                "is_checked": is_checked
+                            },
+                            metadata={
+                                "operation": "update_task_checklist",
+                                "task_id": task_id,
+                                "timestamp": datetime.utcnow().isoformat()
+                            }
+                        )
+                    else:
+                        return ToolResult(success=False, error=f"Failed to update checklist: {update_response.status_code}")
+                else:
+                    return ToolResult(success=False, error="Task not found")
+
+        except Exception as e:
+            logger.error("Error updating task checklist", error=str(e))
+            return ToolResult(success=False, error=f"Failed to update checklist: {str(e)}")
+
+
+class DeleteTask(Tool):
+    """Delete a task from Microsoft Planner"""
+
+    def __init__(self, graph_client: GraphAPIClient, database: Database):
+        super().__init__(
+            "delete_task",
+            "Delete a task from Microsoft Planner"
+        )
+        self.graph_client = graph_client
+        self.database = database
+
+    def _define_parameters(self) -> Dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "task_id": {
+                    "type": "string",
+                    "description": "Task ID to delete (required)"
+                },
+                "confirm": {
+                    "type": "boolean",
+                    "description": "Confirmation that you want to delete the task (required)",
+                    "default": False
+                }
+            },
+            "required": ["task_id", "confirm"]
+        }
+
+    async def execute(self, arguments: Dict[str, Any], context: Dict[str, Any]) -> ToolResult:
+        try:
+            user_id = context.get("user_id", "default")
+            task_id = arguments["task_id"]
+            confirm = arguments.get("confirm", False)
+
+            if not confirm:
+                return ToolResult(
+                    success=False,
+                    error="Task deletion requires explicit confirmation. Set 'confirm' parameter to true."
+                )
+
+            # Get current task to get ETag and info
+            current_task = await self.graph_client.get_task_details(task_id, user_id)
+            if not current_task:
+                return ToolResult(success=False, error="Task not found")
+
+            task_title = current_task.get("title", "Unknown")
+            etag = current_task.get("@odata.etag")
+
+            # Delete task via Graph API
+            result = await self.graph_client.delete_task(task_id, etag, user_id)
+
+            if result:
+                # Remove from local database
+                await self.database.delete_task(task_id)
+
+                return ToolResult(
+                    success=True,
+                    content={
+                        "task_id": task_id,
+                        "task_title": task_title,
+                        "deleted": True
+                    },
+                    metadata={
+                        "operation": "delete_task",
+                        "task_id": task_id,
+                        "task_title": task_title,
+                        "timestamp": datetime.utcnow().isoformat()
+                    }
+                )
+            else:
+                return ToolResult(success=False, error="Failed to delete task")
+
+        except Exception as e:
+            logger.error("Error deleting task", error=str(e))
+            return ToolResult(success=False, error=f"Failed to delete task: {str(e)}")
+
+
+class CreateTasksFromDocument(Tool):
+    """Analyze document and create tasks based on content"""
+
+    def __init__(self, graph_client: GraphAPIClient, database: Database):
+        super().__init__(
+            "create_tasks_from_document",
+            "Analyze a document and create Planner tasks based on its content"
+        )
+        self.graph_client = graph_client
+        self.database = database
+
+    def _define_parameters(self) -> Dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "plan_id": {
+                    "type": "string",
+                    "description": "Plan ID to create tasks in (required)"
+                },
+                "document_query": {
+                    "type": "string",
+                    "description": "Query to find specific document or content (required)"
+                },
+                "bucket_id": {
+                    "type": "string",
+                    "description": "Bucket ID to place tasks in"
+                },
+                "task_prefix": {
+                    "type": "string",
+                    "description": "Prefix for generated task titles",
+                    "default": "Doc Task"
+                },
+                "max_tasks": {
+                    "type": "integer",
+                    "description": "Maximum number of tasks to create",
+                    "minimum": 1,
+                    "maximum": 20,
+                    "default": 5
+                }
+            },
+            "required": ["plan_id", "document_query"]
+        }
+
+    async def execute(self, arguments: Dict[str, Any], context: Dict[str, Any]) -> ToolResult:
+        try:
+            user_id = context.get("user_id", "default")
+            plan_id = arguments["plan_id"]
+            document_query = arguments["document_query"]
+            bucket_id = arguments.get("bucket_id")
+            task_prefix = arguments.get("task_prefix", "Doc Task")
+            max_tasks = arguments.get("max_tasks", 5)
+
+            # Query RAG service for relevant document content
+            rag_response = await self._query_rag_service(document_query, user_id)
+
+            if not rag_response or not rag_response.get("results"):
+                return ToolResult(
+                    success=False,
+                    error="No relevant documents found for the query"
+                )
+
+            # Extract actionable items from document content
+            tasks_to_create = await self._extract_tasks_from_content(
+                rag_response["results"], task_prefix, max_tasks
+            )
+
+            if not tasks_to_create:
+                return ToolResult(
+                    success=False,
+                    error="No actionable tasks could be extracted from the document content"
+                )
+
+            # Create tasks in Microsoft Planner
+            created_tasks = []
+            for task_data in tasks_to_create:
+                task_data["planId"] = plan_id
+                if bucket_id:
+                    task_data["bucketId"] = bucket_id
+
+                result = await self.graph_client.create_task(task_data, user_id)
+                if result:
+                    created_tasks.append(result)
+
+                    # Save to local database
+                    await self.database.save_task({
+                        "graph_id": result["id"],
+                        "plan_graph_id": plan_id,
+                        "title": result["title"],
+                        "description": task_data.get("description", ""),
+                        "metadata": {
+                            "created_via": "document_analysis",
+                            "source_query": document_query,
+                            "created_by": user_id
+                        }
+                    })
+
+            return ToolResult(
+                success=True,
+                content={
+                    "created_tasks": created_tasks,
+                    "task_count": len(created_tasks),
+                    "source_documents": len(rag_response["results"]),
+                    "query_used": document_query
+                },
+                metadata={
+                    "operation": "create_tasks_from_document",
+                    "plan_id": plan_id,
+                    "tasks_created": len(created_tasks),
+                    "timestamp": datetime.utcnow().isoformat()
+                }
+            )
+
+        except Exception as e:
+            logger.error("Error creating tasks from document", error=str(e))
+            return ToolResult(success=False, error=f"Failed to create tasks from document: {str(e)}")
+
+    async def _query_rag_service(self, query: str, user_id: str) -> Optional[Dict[str, Any]]:
+        """Query the RAG service for document content"""
+        import httpx
+
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.post(
+                    "http://rag-service:7120/api/query",
+                    json={
+                        "query": query,
+                        "top_k": 5,
+                        "user_id": user_id
+                    },
+                    timeout=30.0
+                )
+
+                if response.status_code == 200:
+                    return response.json()
+                else:
+                    logger.warning(f"RAG service query failed: {response.status_code}")
+                    return None
+
+        except Exception as e:
+            logger.error(f"Failed to query RAG service: {str(e)}")
+            return None
+
+    async def _extract_tasks_from_content(self, documents: List[Dict], prefix: str, max_tasks: int) -> List[Dict[str, Any]]:
+        """Extract actionable tasks from document content using simple NLP"""
+        tasks = []
+
+        # Simple task extraction patterns
+        task_patterns = [
+            r"(?:TODO|To do|Action item|Task|Must|Need to|Should|Action):\s*(.+?)(?:\.|$)",
+            r"(?:^|\n)\s*[-•*]\s*(.+?)(?:\n|$)",
+            r"(?:Deliverable|Milestone|Objective|Goal):\s*(.+?)(?:\.|$)",
+            r"(?:By|Due|Complete|Finish)\s+(.+?)(?:by|on|before)\s+(.+?)(?:\.|$)"
+        ]
+
+        import re
+
+        for doc in documents[:3]:  # Limit to top 3 most relevant docs
+            content = doc.get("content", "")
+
+            for pattern in task_patterns:
+                matches = re.findall(pattern, content, re.IGNORECASE | re.MULTILINE)
+
+                for match in matches:
+                    if isinstance(match, tuple):
+                        task_text = match[0].strip()
+                    else:
+                        task_text = match.strip()
+
+                    # Clean and validate task text
+                    if len(task_text) > 10 and len(task_text) < 200:
+                        tasks.append({
+                            "title": f"{prefix}: {task_text[:100]}",
+                            "description": f"Extracted from document: {doc.get('source', 'Unknown')}\n\nOriginal content: {task_text}",
+                            "priority": 5
+                        })
+
+                        if len(tasks) >= max_tasks:
+                            break
+
+                if len(tasks) >= max_tasks:
+                    break
+
+            if len(tasks) >= max_tasks:
+                break
+
+        return tasks[:max_tasks]
+
+
+class SearchDocuments(Tool):
+    """Search documents using semantic similarity"""
+
+    def __init__(self, graph_client: GraphAPIClient, database: Database):
+        super().__init__(
+            "search_documents",
+            "Search project documents using semantic similarity"
+        )
+        self.graph_client = graph_client
+        self.database = database
+
+    def _define_parameters(self) -> Dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Search query for documents (required)"
+                },
+                "top_k": {
+                    "type": "integer",
+                    "description": "Number of results to return",
+                    "minimum": 1,
+                    "maximum": 20,
+                    "default": 5
+                },
+                "source_filter": {
+                    "type": "string",
+                    "description": "Filter by document source (openwebui, teams, planner)"
+                },
+                "task_id": {
+                    "type": "string",
+                    "description": "Filter by specific task ID"
+                }
+            },
+            "required": ["query"]
+        }
+
+    async def execute(self, arguments: Dict[str, Any], context: Dict[str, Any]) -> ToolResult:
+        try:
+            user_id = context.get("user_id", "default")
+            query = arguments["query"]
+            top_k = arguments.get("top_k", 5)
+            source_filter = arguments.get("source_filter")
+            task_id = arguments.get("task_id")
+
+            # Build filters for RAG service
+            filters = {}
+            if source_filter:
+                filters["source"] = source_filter
+            if task_id:
+                filters["task_id"] = task_id
+
+            # Query RAG service
+            rag_response = await self._query_rag_service(query, top_k, filters, user_id)
+
+            if not rag_response:
+                return ToolResult(
+                    success=False,
+                    error="Failed to query document search service"
+                )
+
+            results = rag_response.get("results", [])
+
+            # Format results for user
+            formatted_results = []
+            for result in results:
+                formatted_results.append({
+                    "title": result.get("title", "Untitled Document"),
+                    "content_preview": result.get("content", "")[:200] + "...",
+                    "source": result.get("source", "unknown"),
+                    "similarity_score": result.get("score", 0),
+                    "metadata": result.get("metadata", {})
+                })
+
+            return ToolResult(
+                success=True,
+                content={
+                    "results": formatted_results,
+                    "total_found": len(results),
+                    "query": query,
+                    "search_metadata": {
+                        "top_k": top_k,
+                        "filters_applied": filters
+                    }
+                },
+                metadata={
+                    "operation": "search_documents",
+                    "query": query,
+                    "results_count": len(results),
+                    "timestamp": datetime.utcnow().isoformat()
+                }
+            )
+
+        except Exception as e:
+            logger.error("Error searching documents", error=str(e))
+            return ToolResult(success=False, error=f"Failed to search documents: {str(e)}")
+
+    async def _query_rag_service(self, query: str, top_k: int, filters: Dict, user_id: str) -> Optional[Dict[str, Any]]:
+        """Query the RAG service for document search"""
+        import httpx
+
+        try:
+            request_data = {
+                "query": query,
+                "top_k": top_k,
+                "user_id": user_id
+            }
+
+            if filters:
+                request_data["filters"] = filters
+
+            async with httpx.AsyncClient() as client:
+                response = await client.post(
+                    "http://rag-service:7120/api/query",
+                    json=request_data,
+                    timeout=30.0
+                )
+
+                if response.status_code == 200:
+                    return response.json()
+                else:
+                    logger.warning(f"RAG service search failed: {response.status_code}")
+                    return None
+
+        except Exception as e:
+            logger.error(f"Failed to search RAG service: {str(e)}")
+            return None
+
+
+class AnalyzeProjectRelationships(Tool):
+    """Analyze and visualize relationships between projects, tasks, and team members"""
+
+    def __init__(self, graph_client: GraphAPIClient, database: Database):
+        super().__init__(
+            "analyze_project_relationships",
+            "Analyze and visualize relationships between projects, tasks, and team members using knowledge graph"
+        )
+        self.graph_client = graph_client
+        self.database = database
+
+    def _define_parameters(self) -> Dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "entity_type": {
+                    "type": "string",
+                    "description": "Type of entity to analyze relationships for",
+                    "enum": ["project", "task", "user", "team", "all"]
+                },
+                "entity_id": {
+                    "type": "string",
+                    "description": "Specific entity ID to analyze (optional)"
+                },
+                "relationship_depth": {
+                    "type": "integer",
+                    "description": "Depth of relationships to analyze",
+                    "minimum": 1,
+                    "maximum": 3,
+                    "default": 2
+                },
+                "include_metrics": {
+                    "type": "boolean",
+                    "description": "Include relationship strength metrics",
+                    "default": true
+                }
+            },
+            "required": ["entity_type"]
+        }
+
+    async def execute(self, arguments: Dict[str, Any], context: Dict[str, Any]) -> ToolResult:
+        try:
+            user_id = context.get("user_id", "default")
+            entity_type = arguments["entity_type"]
+            entity_id = arguments.get("entity_id")
+            depth = arguments.get("relationship_depth", 2)
+            include_metrics = arguments.get("include_metrics", True)
+
+            # Connect to Neo4j and analyze relationships
+            relationships = await self._analyze_graph_relationships(
+                entity_type, entity_id, depth, include_metrics, user_id
+            )
+
+            if not relationships:
+                return ToolResult(
+                    success=False,
+                    error="No relationships found or knowledge graph is not populated"
+                )
+
+            # Generate insights from relationships
+            insights = await self._generate_relationship_insights(relationships, entity_type)
+
+            return ToolResult(
+                success=True,
+                content={
+                    "entity_type": entity_type,
+                    "entity_id": entity_id,
+                    "relationships": relationships,
+                    "insights": insights,
+                    "relationship_count": len(relationships),
+                    "analysis_depth": depth
+                },
+                metadata={
+                    "operation": "analyze_project_relationships",
+                    "entity_type": entity_type,
+                    "relationships_found": len(relationships),
+                    "timestamp": datetime.utcnow().isoformat()
+                }
+            )
+
+        except Exception as e:
+            logger.error("Error analyzing project relationships", error=str(e))
+            return ToolResult(success=False, error=f"Failed to analyze relationships: {str(e)}")
+
+    async def _analyze_graph_relationships(self, entity_type: str, entity_id: str, depth: int, include_metrics: bool, user_id: str) -> List[Dict]:
+        """Analyze relationships using Neo4j knowledge graph"""
+        try:
+            from neo4j import GraphDatabase
+
+            # Neo4j connection
+            uri = "bolt://neo4j:7687"
+            auth = ("neo4j", "neo4j_password_2024")
+
+            with GraphDatabase.driver(uri, auth=auth) as driver:
+                with driver.session() as session:
+                    # Build Cypher query based on entity type
+                    if entity_type == "all":
+                        query = """
+                        MATCH (n)-[r]-(m)
+                        WHERE n <> m
+                        RETURN n, r, m, type(r) as relationship_type
+                        LIMIT 100
+                        """
+                        params = {}
+                    elif entity_id:
+                        query = f"""
+                        MATCH (start {{id: $entity_id}})-[r*1..{depth}]-(connected)
+                        RETURN start, r, connected
+                        LIMIT 50
+                        """
+                        params = {"entity_id": entity_id}
+                    else:
+                        query = f"""
+                        MATCH (n:{entity_type.capitalize()})-[r*1..{depth}]-(m)
+                        RETURN n, r, m, type(r) as relationship_type
+                        LIMIT 50
+                        """
+                        params = {}
+
+                    result = session.run(query, params)
+                    relationships = []
+
+                    for record in result:
+                        relationships.append({
+                            "source": dict(record["n"]) if "n" in record else None,
+                            "target": dict(record["m"]) if "m" in record else None,
+                            "relationship": record.get("relationship_type", "CONNECTED"),
+                            "strength": self._calculate_relationship_strength(record) if include_metrics else 1.0
+                        })
+
+                    return relationships
+
+        except Exception as e:
+            logger.warning(f"Knowledge graph not available, using fallback analysis: {str(e)}")
+            # Fallback to database analysis
+            return await self._fallback_relationship_analysis(entity_type, entity_id, user_id)
+
+    async def _fallback_relationship_analysis(self, entity_type: str, entity_id: str, user_id: str) -> List[Dict]:
+        """Fallback relationship analysis using database"""
+        relationships = []
+
+        try:
+            # Analyze task assignments
+            if entity_type in ["task", "user", "all"]:
+                # Query database for task-user relationships
+                tasks = await self.database.get_tasks_by_user(user_id) if user_id else []
+
+                for task in tasks[:10]:  # Limit to prevent overflow
+                    relationships.append({
+                        "source": {"id": user_id, "type": "user", "name": user_id},
+                        "target": {"id": task.graph_id, "type": "task", "name": task.title},
+                        "relationship": "ASSIGNED_TO",
+                        "strength": 1.0
+                    })
+
+            # Analyze plan-task relationships
+            if entity_type in ["project", "task", "all"]:
+                plans = await self.graph_client.get_user_plans(user_id) if user_id else []
+
+                for plan in plans[:5]:  # Limit plans
+                    plan_id = plan.get("id")
+                    tasks = await self.graph_client.get_plan_tasks(plan_id, user_id)
+
+                    for task in tasks[:5]:  # Limit tasks per plan
+                        relationships.append({
+                            "source": {"id": plan_id, "type": "project", "name": plan.get("title", "Unknown Plan")},
+                            "target": {"id": task.get("id"), "type": "task", "name": task.get("title", "Unknown Task")},
+                            "relationship": "CONTAINS",
+                            "strength": 1.0
+                        })
+
+        except Exception as e:
+            logger.error(f"Fallback analysis failed: {str(e)}")
+
+        return relationships
+
+    def _calculate_relationship_strength(self, record) -> float:
+        """Calculate relationship strength based on various factors"""
+        # Simple calculation - can be enhanced
+        return 1.0
+
+    async def _generate_relationship_insights(self, relationships: List[Dict], entity_type: str) -> List[str]:
+        """Generate insights from relationship analysis"""
+        insights = []
+
+        if not relationships:
+            return ["No relationships found to analyze"]
+
+        # Count relationships by type
+        relationship_types = {}
+        for rel in relationships:
+            rel_type = rel.get("relationship", "UNKNOWN")
+            relationship_types[rel_type] = relationship_types.get(rel_type, 0) + 1
+
+        # Generate insights
+        total_relationships = len(relationships)
+        insights.append(f"Found {total_relationships} relationships involving {entity_type} entities")
+
+        # Most common relationship type
+        if relationship_types:
+            most_common = max(relationship_types.items(), key=lambda x: x[1])
+            insights.append(f"Most common relationship type: {most_common[0]} ({most_common[1]} instances)")
+
+        # Identify highly connected entities
+        entity_connections = {}
+        for rel in relationships:
+            source_id = rel.get("source", {}).get("id")
+            target_id = rel.get("target", {}).get("id")
+
+            if source_id:
+                entity_connections[source_id] = entity_connections.get(source_id, 0) + 1
+            if target_id:
+                entity_connections[target_id] = entity_connections.get(target_id, 0) + 1
+
+        if entity_connections:
+            highly_connected = max(entity_connections.items(), key=lambda x: x[1])
+            insights.append(f"Most connected entity: {highly_connected[0]} ({highly_connected[1]} connections)")
+
+        return insights
+
+
+class UpdateKnowledgeGraph(Tool):
+    """Update knowledge graph with new entities and relationships"""
+
+    def __init__(self, graph_client: GraphAPIClient, database: Database):
+        super().__init__(
+            "update_knowledge_graph",
+            "Update knowledge graph with new entities and relationships from Planner data"
+        )
+        self.graph_client = graph_client
+        self.database = database
+
+    def _define_parameters(self) -> Dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "sync_type": {
+                    "type": "string",
+                    "description": "Type of sync to perform",
+                    "enum": ["full", "incremental", "plans", "tasks", "users"],
+                    "default": "incremental"
+                },
+                "plan_id": {
+                    "type": "string",
+                    "description": "Specific plan ID to sync (optional)"
+                }
+            }
+        }
+
+    async def execute(self, arguments: Dict[str, Any], context: Dict[str, Any]) -> ToolResult:
+        try:
+            user_id = context.get("user_id", "default")
+            sync_type = arguments.get("sync_type", "incremental")
+            plan_id = arguments.get("plan_id")
+
+            # Update knowledge graph
+            update_results = await self._update_graph_entities(sync_type, plan_id, user_id)
+
+            return ToolResult(
+                success=True,
+                content={
+                    "sync_type": sync_type,
+                    "entities_created": update_results.get("entities_created", 0),
+                    "relationships_created": update_results.get("relationships_created", 0),
+                    "entities_updated": update_results.get("entities_updated", 0),
+                    "sync_timestamp": datetime.utcnow().isoformat()
+                },
+                metadata={
+                    "operation": "update_knowledge_graph",
+                    "sync_type": sync_type,
+                    "timestamp": datetime.utcnow().isoformat()
+                }
+            )
+
+        except Exception as e:
+            logger.error("Error updating knowledge graph", error=str(e))
+            return ToolResult(success=False, error=f"Failed to update knowledge graph: {str(e)}")
+
+    async def _update_graph_entities(self, sync_type: str, plan_id: str, user_id: str) -> Dict[str, int]:
+        """Update Neo4j knowledge graph with Planner entities"""
+        results = {"entities_created": 0, "relationships_created": 0, "entities_updated": 0}
+
+        try:
+            from neo4j import GraphDatabase
+
+            uri = "bolt://neo4j:7687"
+            auth = ("neo4j", "neo4j_password_2024")
+
+            with GraphDatabase.driver(uri, auth=auth) as driver:
+                with driver.session() as session:
+                    # Create constraints and indexes
+                    await self._create_graph_schema(session)
+
+                    if sync_type in ["full", "plans"] or plan_id:
+                        results.update(await self._sync_plans(session, plan_id, user_id))
+
+                    if sync_type in ["full", "tasks"]:
+                        results.update(await self._sync_tasks(session, user_id))
+
+                    if sync_type in ["full", "users"]:
+                        results.update(await self._sync_users(session, user_id))
+
+        except Exception as e:
+            logger.warning(f"Knowledge graph update failed, will retry later: {str(e)}")
+
+        return results
+
+    async def _create_graph_schema(self, session):
+        """Create Neo4j schema constraints and indexes"""
+        constraints = [
+            "CREATE CONSTRAINT IF NOT EXISTS FOR (p:Project) REQUIRE p.id IS UNIQUE",
+            "CREATE CONSTRAINT IF NOT EXISTS FOR (t:Task) REQUIRE t.id IS UNIQUE",
+            "CREATE CONSTRAINT IF NOT EXISTS FOR (u:User) REQUIRE u.id IS UNIQUE",
+            "CREATE CONSTRAINT IF NOT EXISTS FOR (b:Bucket) REQUIRE b.id IS UNIQUE"
+        ]
+
+        for constraint in constraints:
+            try:
+                session.run(constraint)
+            except Exception as e:
+                logger.debug(f"Constraint already exists or failed: {str(e)}")
+
+    async def _sync_plans(self, session, plan_id: str, user_id: str) -> Dict[str, int]:
+        """Sync plans to knowledge graph"""
+        results = {"entities_created": 0, "relationships_created": 0, "entities_updated": 0}
+
+        try:
+            if plan_id:
+                plans = [await self.graph_client.get_plan_details(plan_id, user_id)]
+            else:
+                plans = await self.graph_client.get_user_plans(user_id)
+
+            for plan in plans:
+                if not plan:
+                    continue
+
+                # Create/update plan node
+                query = """
+                MERGE (p:Project {id: $id})
+                SET p.title = $title,
+                    p.description = $description,
+                    p.created_date = $created_date,
+                    p.updated_date = datetime()
+                RETURN p
+                """
+
+                result = session.run(query, {
+                    "id": plan.get("id"),
+                    "title": plan.get("title", "Unknown Plan"),
+                    "description": plan.get("description", ""),
+                    "created_date": plan.get("createdDateTime", datetime.utcnow().isoformat())
+                })
+
+                if result.single():
+                    results["entities_created"] += 1
+
+        except Exception as e:
+            logger.error(f"Plan sync failed: {str(e)}")
+
+        return results
+
+    async def _sync_tasks(self, session, user_id: str) -> Dict[str, int]:
+        """Sync tasks to knowledge graph"""
+        results = {"entities_created": 0, "relationships_created": 0, "entities_updated": 0}
+
+        try:
+            # Get tasks from database
+            tasks = await self.database.get_tasks_by_user(user_id)
+
+            for task in tasks[:20]:  # Limit to prevent overwhelming
+                # Create/update task node
+                query = """
+                MERGE (t:Task {id: $id})
+                SET t.title = $title,
+                    t.description = $description,
+                    t.priority = $priority,
+                    t.completion_percentage = $completion_percentage,
+                    t.updated_date = datetime()
+                RETURN t
+                """
+
+                result = session.run(query, {
+                    "id": task.graph_id,
+                    "title": task.title or "Unknown Task",
+                    "description": task.description or "",
+                    "priority": getattr(task, "priority", 5),
+                    "completion_percentage": task.completion_percentage or 0
+                })
+
+                if result.single():
+                    results["entities_created"] += 1
+
+                # Create relationship to plan
+                if task.plan_graph_id:
+                    rel_query = """
+                    MATCH (p:Project {id: $plan_id}), (t:Task {id: $task_id})
+                    MERGE (p)-[r:CONTAINS]->(t)
+                    RETURN r
+                    """
+
+                    rel_result = session.run(rel_query, {
+                        "plan_id": task.plan_graph_id,
+                        "task_id": task.graph_id
+                    })
+
+                    if rel_result.single():
+                        results["relationships_created"] += 1
+
+        except Exception as e:
+            logger.error(f"Task sync failed: {str(e)}")
+
+        return results
+
+    async def _sync_users(self, session, user_id: str) -> Dict[str, int]:
+        """Sync users to knowledge graph"""
+        results = {"entities_created": 0, "relationships_created": 0, "entities_updated": 0}
+
+        try:
+            # Create/update user node
+            query = """
+            MERGE (u:User {id: $id})
+            SET u.name = $name,
+                u.updated_date = datetime()
+            RETURN u
+            """
+
+            result = session.run(query, {
+                "id": user_id,
+                "name": user_id  # Can be enhanced with actual user details
+            })
+
+            if result.single():
+                results["entities_created"] += 1
+
+        except Exception as e:
+            logger.error(f"User sync failed: {str(e)}")
+
+        return results
+
+
 class ToolRegistry:
     """Registry and manager for MCP tools"""
 
@@ -1571,10 +2740,13 @@ class ToolRegistry:
             self.tools["list_tasks"] = ListTasks(self.graph_client, self.database)
             self.tools["create_task"] = CreateTask(self.graph_client, self.database)
             self.tools["update_task"] = UpdateTask(self.graph_client, self.database)
+            self.tools["delete_task"] = DeleteTask(self.graph_client, self.database)
 
             # Register enhanced task operations (Phase 1)
             self.tools["get_task_details"] = GetTaskDetails(self.graph_client, self.database)
             self.tools["add_task_comment"] = AddTaskComment(self.graph_client, self.database)
+            self.tools["add_task_checklist"] = AddTaskChecklist(self.graph_client, self.database)
+            self.tools["update_task_checklist"] = UpdateTaskChecklist(self.graph_client, self.database)
             self.tools["search_tasks"] = SearchTasks(self.graph_client, self.database)
             self.tools["get_my_tasks"] = GetMyTasks(self.graph_client, self.database)
 
@@ -1585,6 +2757,14 @@ class ToolRegistry:
 
             # Register search tools
             self.tools["search_plans"] = SearchPlans(self.graph_client, self.database)
+
+            # Register RAG integration tools (Epic 3 - Document Management)
+            self.tools["create_tasks_from_document"] = CreateTasksFromDocument(self.graph_client, self.database)
+            self.tools["search_documents"] = SearchDocuments(self.graph_client, self.database)
+
+            # Register Knowledge Graph tools (Epic 3 - Knowledge Management)
+            self.tools["analyze_project_relationships"] = AnalyzeProjectRelationships(self.graph_client, self.database)
+            self.tools["update_knowledge_graph"] = UpdateKnowledgeGraph(self.graph_client, self.database)
 
             # Register NLP processing tool (Story 1.3)
             nlp_components = {

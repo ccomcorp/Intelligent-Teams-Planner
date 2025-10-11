@@ -18,8 +18,8 @@ import structlog
 from .storage.vector_store import VectorStore
 from .storage.postgres_client import PostgresClient
 from .processing.document_processor import DocumentProcessor
-from .processing.embeddings import EmbeddingGenerator
-from .query.semantic_search import SemanticSearchEngine
+from .search.semantic_search import SemanticSearchEngine
+from .embeddings.text_embedder import TextEmbedder
 
 # Configure structured logging
 structlog.configure(
@@ -35,14 +35,14 @@ logger = structlog.get_logger(__name__)
 vector_store: VectorStore = None
 postgres_client: PostgresClient = None
 document_processor: DocumentProcessor = None
-embedding_generator: EmbeddingGenerator = None
+text_embedder: TextEmbedder = None
 search_engine: SemanticSearchEngine = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan management"""
-    global vector_store, postgres_client, document_processor, embedding_generator, search_engine
+    global vector_store, postgres_client, document_processor, text_embedder, search_engine
 
     try:
         # Initialize database connections
@@ -53,17 +53,16 @@ async def lifespan(app: FastAPI):
         postgres_client = PostgresClient(database_url)
         await postgres_client.initialize()
 
-        # Initialize vector store with 768 dimensions
-        vector_store = VectorStore(postgres_client, dimension=768)
+        # Initialize vector store with 384 dimensions (MiniLM)
+        vector_store = VectorStore(postgres_client, dimension=384)
         await vector_store.initialize()
 
         # Initialize processing components
-        embedding_generator = EmbeddingGenerator()
-        await embedding_generator.initialize()
-        document_processor = DocumentProcessor()
+        text_embedder = TextEmbedder()
+        document_processor = DocumentProcessor(enable_embeddings=True)
 
         # Initialize search engine
-        search_engine = SemanticSearchEngine(vector_store, embedding_generator)
+        search_engine = SemanticSearchEngine(vector_store)
 
         logger.info("RAG Service initialized successfully")
         yield
@@ -272,15 +271,19 @@ async def query_documents(
 
         logger.info("Processing search request", query=request.query, user_id=request.user_id)
 
-        # Perform search
-        results = await search_engine.search(
+        # Perform semantic search
+        search_response = await search_engine.search(
             query=request.query,
+            user_id=request.user_id,
             limit=request.top_k,
             filters=request.filters,
-            user_id=request.user_id
+            include_context=True,
+            search_type="semantic"
         )
 
-        processing_time = (asyncio.get_event_loop().time() - start_time) * 1000
+        # Extract results from the semantic search response
+        raw_results = search_response.get('results', [])
+        processing_time = search_response.get('metadata', {}).get('processing_time_ms', 0)
 
         # Convert to response format
         search_results = [
@@ -293,11 +296,11 @@ async def query_documents(
                 task_id=result.get("task_id"),
                 task_title=result.get("task_title"),
                 chunk_index=result["chunk_index"],
-                similarity_score=result["similarity_score"],
-                snippet=result["snippet"],
-                metadata=_parse_metadata(result.get("chunk_metadata"))
+                similarity_score=result.get("similarity_score", result.get("relevance_score", 0.0)),
+                snippet=result.get("search_snippet", result["content"][:200]),
+                metadata=result.get("chunk_metadata", {})
             )
-            for result in results
+            for result in raw_results
         ]
 
         return SearchResponse(
@@ -360,6 +363,74 @@ async def list_documents(
     except Exception as e:
         logger.error("Error listing documents", error=str(e), user_id=user_id)
         raise HTTPException(status_code=500, detail=f"Failed to list documents: {str(e)}")
+
+
+# Additional Semantic Search Endpoints (Story 6.2)
+
+@app.get("/api/search/similar/{document_id}")
+async def find_similar_documents(
+    document_id: str,
+    limit: int = 10,
+    search_engine: SemanticSearchEngine = Depends(get_search_engine)
+):
+    """Find documents similar to a given document"""
+    try:
+        similar_docs = await search_engine.find_similar_documents(
+            document_id=document_id,
+            limit=limit
+        )
+
+        return {
+            'source_document_id': document_id,
+            'similar_documents': similar_docs,
+            'metadata': {
+                'count': len(similar_docs),
+                'timestamp': asyncio.get_event_loop().time()
+            }
+        }
+
+    except Exception as e:
+        logger.error("Similar documents search failed", error=str(e), document_id=document_id)
+        raise HTTPException(status_code=500, detail=f"Similar documents search failed: {str(e)}")
+
+
+@app.post("/api/search/similarity")
+async def calculate_text_similarity(
+    text1: str = Form(...),
+    text2: str = Form(...),
+    search_engine: SemanticSearchEngine = Depends(get_search_engine)
+):
+    """Calculate semantic similarity between two texts"""
+    try:
+        similarity_score = await search_engine.semantic_similarity(text1=text1, text2=text2)
+
+        return {
+            'similarity_score': similarity_score,
+            'metadata': {
+                'text1_length': len(text1),
+                'text2_length': len(text2),
+                'timestamp': asyncio.get_event_loop().time()
+            }
+        }
+
+    except Exception as e:
+        logger.error("Text similarity calculation failed", error=str(e))
+        raise HTTPException(status_code=500, detail=f"Similarity calculation failed: {str(e)}")
+
+
+@app.get("/api/search/config")
+async def get_search_config(search_engine: SemanticSearchEngine = Depends(get_search_engine)):
+    """Get current search engine configuration"""
+    try:
+        config = search_engine.get_search_config()
+        return {
+            'search_config': config,
+            'timestamp': asyncio.get_event_loop().time()
+        }
+
+    except Exception as e:
+        logger.error("Failed to get search config", error=str(e))
+        raise HTTPException(status_code=500, detail=f"Failed to get configuration: {str(e)}")
 
 
 def main():

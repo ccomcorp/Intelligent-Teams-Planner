@@ -1,6 +1,6 @@
 """
-Document processor with multi-format support using Docling
-Story 6.1 Task 1: Implement Multi-Format Document Parser
+Document processor with multi-format support using Unstructured.io
+Story 6.1: Advanced Document Processing Pipeline
 Aligned with IMPLEMENTATION-PLAN.md multi-source approach
 """
 
@@ -13,53 +13,63 @@ import tempfile
 import os
 
 import structlog
-from docling.document_converter import DocumentConverter, PdfFormatOption
-from docling.datamodel.base_models import InputFormat
-from docling.datamodel.pipeline_options import PdfPipelineOptions
-from docling.backend.pypdfium2_backend import PyPdfiumDocumentBackend
+import importlib.util
+import sys
+import os
 
 logger = structlog.get_logger(__name__)
+
+# Import UniversalDocumentParser with proper path handling for hyphenated directory
+document_processing_path = os.path.join(os.path.dirname(__file__), '..', 'document-processing', 'parsers', 'universal_parser.py')
+spec = importlib.util.spec_from_file_location("universal_parser", document_processing_path)
+universal_parser_module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(universal_parser_module)
+UniversalDocumentParser = universal_parser_module.UniversalDocumentParser
+
+# Import TextEmbedder for semantic search capabilities
+try:
+    from ..embeddings.text_embedder import TextEmbedder
+    EMBEDDINGS_AVAILABLE = True
+except ImportError:
+    logger.warning("TextEmbedder not available - embeddings will be skipped")
+    EMBEDDINGS_AVAILABLE = False
 
 
 class DocumentProcessor:
     """
-    Advanced document processor with multi-format support using Docling
+    Advanced document processor with multi-format support using Unstructured.io
     Supports multi-source ingestion (OpenWebUI, Teams, Planner)
     """
 
-    def __init__(self, chunk_size: int = 512, chunk_overlap: int = 50):
+    def __init__(self, chunk_size: int = 1000, chunk_overlap: int = 100, enable_embeddings: bool = True):
         self.chunk_size = chunk_size
         self.chunk_overlap = chunk_overlap
+        self.enable_embeddings = enable_embeddings and EMBEDDINGS_AVAILABLE
 
-        # Supported file formats via Docling
-        self.supported_formats = {
-            '.pdf': InputFormat.PDF,
-            '.docx': InputFormat.DOCX,
-            '.pptx': InputFormat.PPTX,
-            '.xlsx': InputFormat.XLSX,
-            '.html': InputFormat.HTML,
-            '.md': InputFormat.MD,
-            '.csv': InputFormat.CSV,
-            '.json': InputFormat.JSON_DOCLING
+        # Initialize Universal Document Parser with configuration
+        parser_config = {
+            'max_chunk_size': chunk_size,
+            'chunk_overlap': chunk_overlap,
+            'ocr_enabled': True,
+            'ocr_languages': ['eng']
         }
 
-        # Configure Docling converter with full functionality (2025 approach)
-        pipeline_options = PdfPipelineOptions()
-        pipeline_options.do_ocr = True  # Enable OCR for scanned PDFs
-        pipeline_options.do_table_structure = True  # Extract table structure
-        pipeline_options.table_structure_options.do_cell_matching = True  # Map structure to PDF cells
+        self.parser = UniversalDocumentParser(config=parser_config)
 
-        self.converter = DocumentConverter(
-            format_options={
-                InputFormat.PDF: PdfFormatOption(
-                    pipeline_options=pipeline_options
-                )
-            }
-        )
+        # Initialize text embedder for semantic search
+        self.text_embedder = None
+        if self.enable_embeddings:
+            try:
+                self.text_embedder = TextEmbedder()
+            except Exception as e:
+                logger.warning("Failed to initialize text embedder", error=str(e))
+                self.enable_embeddings = False
 
         logger.info("DocumentProcessor initialized",
-                   supported_formats=list(self.supported_formats.keys()),
-                   chunk_size=chunk_size)
+                   supported_formats=self.parser.get_supported_formats(),
+                   chunk_size=chunk_size,
+                   parser_type='unstructured.io',
+                   embeddings_enabled=self.enable_embeddings)
 
     async def process_document(
         self,
@@ -74,7 +84,7 @@ class DocumentProcessor:
         metadata: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
         """
-        Process document content with multi-source support
+        Process document content with multi-source support using Unstructured.io
 
         Args:
             content: Raw document bytes
@@ -97,65 +107,85 @@ class DocumentProcessor:
                        size=len(content),
                        uploaded_by=uploaded_by)
 
-            # Generate document ID
-            document_id = str(uuid.uuid4())
+            # Detect MIME type
+            mime_type = self._get_content_type(Path(filename).suffix.lower())
 
-            # Validate file format
-            file_ext = Path(filename).suffix.lower()
-            if file_ext not in self.supported_formats:
-                raise ValueError(f"Unsupported file format: {file_ext}")
+            # Prepare additional metadata for parsing
+            parsing_metadata = {
+                'source': source,
+                'source_id': source_id,
+                'uploaded_by': uploaded_by,
+                'task_id': task_id,
+                'task_title': task_title,
+                'conversation_id': conversation_id,
+                'file_size': len(content)
+            }
 
-            # Create temporary file for Docling processing
-            with tempfile.NamedTemporaryFile(suffix=file_ext, delete=False) as tmp_file:
-                tmp_file.write(content)
-                tmp_file_path = tmp_file.name
+            if metadata:
+                parsing_metadata.update(metadata)
 
-            try:
-                # Convert document using Docling
-                conversion_result = self.converter.convert(tmp_file_path)
-                doc = conversion_result.document
+            # Parse document using UniversalDocumentParser
+            parsed_result = await self.parser.parse_document(
+                content=content,
+                filename=filename,
+                mime_type=mime_type,
+                **parsing_metadata
+            )
 
-                # Extract structured content
-                extracted_content = await self._extract_structured_content(doc)
+            if not parsed_result.get('processing_success'):
+                raise ValueError(f"Document parsing failed: {parsed_result.get('error')}")
 
-                # Extract metadata
-                doc_metadata = await self._extract_metadata(doc, filename, content, source)
-                if metadata:
-                    doc_metadata.update(metadata)
+            # Generate embeddings for chunks if enabled
+            chunks_with_embeddings = parsed_result["chunks"]
+            if self.enable_embeddings and self.text_embedder:
+                try:
+                    logger.info("Generating embeddings for document chunks",
+                               document_id=parsed_result["document_id"],
+                               chunks_count=len(chunks_with_embeddings))
 
-                # Create text chunks
-                chunks = await self._create_chunks(extracted_content["text"])
+                    chunks_with_embeddings = await self.text_embedder.embed_document_chunks(
+                        chunks_with_embeddings
+                    )
 
-                # Compile final document structure (aligned with implementation plan)
-                processed_doc = {
-                    "document_id": document_id,
-                    "filename": filename,
-                    "source": source,
-                    "source_id": source_id,
-                    "uploaded_by": uploaded_by,
-                    "file_size": len(content),
-                    "content_type": self._get_content_type(file_ext),
-                    "task_id": task_id,
-                    "task_title": task_title,
-                    "conversation_id": conversation_id,
-                    "metadata": doc_metadata,
-                    "extracted_content": extracted_content,
-                    "chunks": chunks,
-                    "processing_status": "completed"
-                }
+                    logger.info("Embeddings generated successfully",
+                               document_id=parsed_result["document_id"],
+                               embedded_chunks=len(chunks_with_embeddings))
 
-                logger.info("Document processed successfully",
-                           document_id=document_id,
-                           source=source,
-                           chunks_created=len(chunks),
-                           text_length=len(extracted_content["text"]))
+                except Exception as e:
+                    logger.warning("Failed to generate embeddings, proceeding without them",
+                                 error=str(e),
+                                 document_id=parsed_result["document_id"])
 
-                return processed_doc
+            # Transform to expected format for RAG service
+            processed_doc = {
+                "document_id": parsed_result["document_id"],
+                "filename": filename,
+                "source": source,
+                "source_id": source_id,
+                "uploaded_by": uploaded_by,
+                "file_size": len(content),
+                "content_type": mime_type,
+                "task_id": task_id,
+                "task_title": task_title,
+                "conversation_id": conversation_id,
+                "metadata": parsed_result["metadata"],
+                "extracted_content": parsed_result["content"],
+                "chunks": chunks_with_embeddings,
+                "processing_status": "completed",
+                "processing_time_ms": parsed_result.get("processing_time_ms", 0),
+                "elements_count": parsed_result.get("elements_count", 0),
+                "chunks_count": parsed_result.get("chunks_count", 0),
+                "embeddings_generated": self.enable_embeddings and len(chunks_with_embeddings) > 0
+            }
 
-            finally:
-                # Clean up temporary file
-                if os.path.exists(tmp_file_path):
-                    os.unlink(tmp_file_path)
+            logger.info("Document processed successfully",
+                       document_id=parsed_result["document_id"],
+                       source=source,
+                       chunks_created=len(parsed_result["chunks"]),
+                       text_length=len(parsed_result["content"].get("text", "")),
+                       processing_time_ms=parsed_result.get("processing_time_ms", 0))
+
+            return processed_doc
 
         except Exception as e:
             logger.error("Document processing failed",
@@ -314,6 +344,7 @@ class DocumentProcessor:
             '.html': 'text/html',
             '.md': 'text/markdown',
             '.txt': 'text/plain',
+            '.csv': 'text/plain',  # CSV files mapped to text/plain
             '.rtf': 'application/rtf',
             '.odt': 'application/vnd.oasis.opendocument.text',
             '.odp': 'application/vnd.oasis.opendocument.presentation',
@@ -380,7 +411,7 @@ class DocumentProcessor:
 
     def get_supported_formats(self) -> List[str]:
         """Get list of supported file formats"""
-        return list(self.supported_formats.keys())
+        return self.parser.get_supported_formats()
 
     async def process_batch(self, documents: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Process multiple documents in batch"""

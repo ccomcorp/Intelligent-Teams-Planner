@@ -439,3 +439,131 @@ class GraphAPIClient:
                 "createdDateTime": datetime.utcnow().isoformat() + "Z"
             }
         return None
+
+    # SharePoint operations (Task 3)
+
+    async def get_sharepoint_sites(self, user_id: str) -> List[Dict[str, Any]]:
+        """Get SharePoint sites accessible to user"""
+        return await self._make_request("GET", "/sites", user_id) or []
+
+    async def get_site_document_libraries(self, site_id: str, user_id: str) -> List[Dict[str, Any]]:
+        """Get document libraries for a SharePoint site"""
+        result = await self._make_request("GET", f"/sites/{site_id}/drives", user_id)
+        return result.get("value", []) if result else []
+
+    async def get_library_documents(self, site_id: str, library_id: str, user_id: str) -> List[Dict[str, Any]]:
+        """Get documents from a SharePoint library"""
+        result = await self._make_request("GET", f"/sites/{site_id}/drives/{library_id}/root/children", user_id)
+        return result.get("value", []) if result else []
+
+    async def upload_document_to_sharepoint(
+        self,
+        site_id: str,
+        library_id: str,
+        filename: str,
+        content: bytes,
+        user_id: str
+    ) -> Optional[Dict[str, Any]]:
+        """Upload document to SharePoint library"""
+        # For files < 4MB, use simple upload
+        if len(content) < 4 * 1024 * 1024:
+            endpoint = f"/sites/{site_id}/drives/{library_id}/root:/{filename}:/content"
+            headers = {
+                "Authorization": f"Bearer {await self.auth_service.get_access_token(user_id)}",
+                "Content-Type": "application/octet-stream"
+            }
+
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                response = await client.put(
+                    f"{self.base_url}{endpoint}",
+                    headers=headers,
+                    content=content
+                )
+
+                if response.status_code in [200, 201]:
+                    return response.json()
+
+        return None
+
+    # Calendar operations (Task 4)
+
+    async def get_user_calendar(self, user_id: str) -> Optional[Dict[str, Any]]:
+        """Get user's default calendar"""
+        return await self._make_request("GET", "/me/calendar", user_id)
+
+    async def get_calendar_events(
+        self,
+        user_id: str,
+        start_time: Optional[str] = None,
+        end_time: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        """Get calendar events for date range"""
+        params = {}
+        if start_time and end_time:
+            params["$filter"] = f"start/dateTime ge '{start_time}' and end/dateTime le '{end_time}'"
+
+        result = await self._make_request("GET", "/me/events", user_id, params=params)
+        return result.get("value", []) if result else []
+
+    async def create_calendar_event(
+        self,
+        user_id: str,
+        subject: str,
+        start_time: str,
+        end_time: str,
+        attendees: List[str] = None,
+        body: str = None,
+        location: str = None
+    ) -> Optional[Dict[str, Any]]:
+        """Create calendar event"""
+        event_data = {
+            "subject": subject,
+            "start": {
+                "dateTime": start_time,
+                "timeZone": "UTC"
+            },
+            "end": {
+                "dateTime": end_time,
+                "timeZone": "UTC"
+            }
+        }
+
+        if body:
+            event_data["body"] = {
+                "contentType": "text",
+                "content": body
+            }
+
+        if location:
+            event_data["location"] = {"displayName": location}
+
+        if attendees:
+            event_data["attendees"] = [
+                {
+                    "emailAddress": {"address": email, "name": email},
+                    "type": "required"
+                }
+                for email in attendees
+            ]
+
+        return await self._make_request("POST", "/me/events", user_id, data=event_data, use_cache=False)
+
+    async def update_calendar_event(
+        self,
+        event_id: str,
+        user_id: str,
+        updates: Dict[str, Any]
+    ) -> Optional[Dict[str, Any]]:
+        """Update calendar event"""
+        return await self._make_request(
+            "PATCH",
+            f"/me/events/{event_id}",
+            user_id,
+            data=updates,
+            use_cache=False
+        )
+
+    async def delete_calendar_event(self, event_id: str, user_id: str) -> bool:
+        """Delete calendar event"""
+        result = await self._make_request("DELETE", f"/me/events/{event_id}", user_id, use_cache=False)
+        return result is not None

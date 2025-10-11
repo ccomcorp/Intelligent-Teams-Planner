@@ -424,12 +424,16 @@ class VectorStore:
         """Log search analytics for optimization"""
         try:
             async with self.pool.acquire() as conn:
+                # Ensure user_id is a string, not a dict
+                if isinstance(user_id, dict):
+                    user_id = user_id.get('user_id', 'unknown')
+
                 # Convert filters dict to JSON string for storage
                 filters_json = json.dumps(filters or {})
                 await conn.execute("""
                     INSERT INTO search_analytics (query, user_id, results_count, processing_time_ms, filters)
                     VALUES ($1, $2, $3, $4, $5)
-                """, query, user_id, results_count, processing_time_ms, filters_json)
+                """, query, str(user_id), results_count, processing_time_ms, filters_json)
 
         except Exception as e:
             logger.warning("Failed to log search analytics", error=str(e))
