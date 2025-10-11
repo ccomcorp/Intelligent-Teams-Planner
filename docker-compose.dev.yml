@@ -1,0 +1,298 @@
+version: '3.8'
+
+# Development Docker Compose for Intelligent Teams Planner v2.0
+# Fast iteration, debugging support, hot reloading
+# Usage: docker compose -f docker-compose.dev.yml up
+
+services:
+  # Core Database - PostgreSQL with pgvector (Development Mode)
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: itp-postgres-dev
+    environment:
+      POSTGRES_DB: intelligent_teams_planner_dev
+      POSTGRES_USER: itp_dev_user
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-dev_password_2024}
+      POSTGRES_INITDB_ARGS: "--auth-host=trust"  # Simplified auth for dev
+    volumes:
+      - postgres_dev_data:/var/lib/postgresql/data
+      - ./database/init:/docker-entrypoint-initdb.d
+    ports:
+      - "5433:5432"  # Different port to avoid conflicts
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U itp_dev_user -d intelligent_teams_planner_dev"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+    networks:
+      - itp-dev-network
+
+  # Redis for caching (Development Mode)
+  redis:
+    image: redis:7-alpine
+    container_name: itp-redis-dev
+    command: redis-server --requirepass ${REDIS_PASSWORD:-dev_redis_2024}
+    volumes:
+      - redis_dev_data:/data
+    ports:
+      - "6380:6379"  # Different port to avoid conflicts
+    healthcheck:
+      test: ["CMD", "redis-cli", "--raw", "incr", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+    networks:
+      - itp-dev-network
+
+  # MCP Server - Development Mode with Hot Reloading
+  mcp-server:
+    build:
+      context: ./planner-mcp-server
+      dockerfile: Dockerfile.dev
+      target: development
+    container_name: itp-mcp-server-dev
+    environment:
+      - PORT=7100
+      - DATABASE_URL=postgresql+asyncpg://itp_dev_user:dev_password_2024@postgres:5432/intelligent_teams_planner_dev
+      - REDIS_URL=redis://redis:6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-dev_redis_2024}
+      - ENCRYPTION_KEY=${ENCRYPTION_KEY:-dev12345678901234567890123456789012}
+      - TESTING_MODE=true
+      - DEV_MODE=true
+      - LOG_LEVEL=DEBUG
+      - MICROSOFT_CLIENT_ID=${MICROSOFT_CLIENT_ID:-test-client-id}
+      - MICROSOFT_CLIENT_SECRET=${MICROSOFT_CLIENT_SECRET:-test-client-secret}
+      - MICROSOFT_TENANT_ID=${MICROSOFT_TENANT_ID:-test-tenant-id}
+    volumes:
+      - ./planner-mcp-server/src:/app/src:rw  # Hot reloading
+      - ./planner-mcp-server/tests:/app/tests:rw
+    ports:
+      - "7100:7100"
+      - "5678:5678"  # Debug port
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:7100/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+    networks:
+      - itp-dev-network
+    command: ["python", "-m", "debugpy", "--listen", "0.0.0.0:5678", "-m", "src.main"]
+
+  # MCPO Proxy - Development Mode
+  mcpo-proxy:
+    build:
+      context: ./mcpo-proxy
+      dockerfile: Dockerfile.dev
+      target: development
+    container_name: itp-mcpo-proxy-dev
+    environment:
+      - PORT=7105
+      - MCP_SERVER_URL=http://mcp-server:7100
+      - REDIS_URL=redis://redis:6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-dev_redis_2024}
+      - DEV_MODE=true
+      - LOG_LEVEL=DEBUG
+    volumes:
+      - ./mcpo-proxy/src:/app/src:rw  # Hot reloading
+      - ./mcpo-proxy/tests:/app/tests:rw
+    ports:
+      - "7105:7105"
+      - "5679:5679"  # Debug port
+    depends_on:
+      mcp-server:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:7105/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+    networks:
+      - itp-dev-network
+
+  # Teams Bot - Development Mode
+  teams-bot:
+    build:
+      context: ./teams-bot
+      dockerfile: Dockerfile.dev
+      target: development
+    container_name: itp-teams-bot-dev
+    environment:
+      - PORT=7110
+      - BOT_ID=${BOT_ID:-test-bot-id}
+      - BOT_PASSWORD=${BOT_PASSWORD:-test-bot-password}
+      - OPENWEBUI_URL=http://openwebui:7115
+      - REDIS_URL=redis://redis:6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-dev_redis_2024}
+      - DEV_MODE=true
+      - LOG_LEVEL=DEBUG
+    volumes:
+      - ./teams-bot/src:/app/src:rw  # Hot reloading
+      - ./teams-bot/tests:/app/tests:rw
+    ports:
+      - "7110:7110"
+      - "5680:5680"  # Debug port
+    depends_on:
+      openwebui:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:7110/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+    networks:
+      - itp-dev-network
+
+  # RAG Service - Development Mode
+  rag-service:
+    build:
+      context: ./rag-service
+      dockerfile: Dockerfile.dev
+      target: development
+    container_name: itp-rag-service-dev
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://itp_dev_user:dev_password_2024@postgres:5432/intelligent_teams_planner_dev
+      - REDIS_URL=redis://redis:6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-dev_redis_2024}
+      - PORT=7120
+      - LOG_LEVEL=DEBUG
+      - DEV_MODE=true
+      - MAX_FILE_SIZE_MB=100
+      - CHUNK_SIZE=1000
+      - CHUNK_OVERLAP=200
+      - EMBEDDING_MODEL=sentence-transformers/all-MiniLM-L6-v2
+      - OPENWEBUI_ENABLED=true
+      - TEAMS_ENABLED=true
+      - PLANNER_ENABLED=true
+      - MICROSOFT_CLIENT_ID=${MICROSOFT_CLIENT_ID:-test-client-id}
+      - MICROSOFT_CLIENT_SECRET=${MICROSOFT_CLIENT_SECRET:-test-client-secret}
+      - MICROSOFT_TENANT_ID=${MICROSOFT_TENANT_ID:-test-tenant-id}
+    volumes:
+      - ./rag-service/src:/app/src:rw  # Hot reloading
+      - ./rag-service/tests:/app/tests:rw
+      - rag_dev_uploads:/app/uploads
+    ports:
+      - "7120:7120"
+      - "5681:5681"  # Debug port
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:7120/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+    networks:
+      - itp-dev-network
+
+  # Neo4j Knowledge Graph Database (Development Mode)
+  neo4j:
+    image: neo4j:5.15-community
+    container_name: itp-neo4j-dev
+    environment:
+      - NEO4J_AUTH=neo4j/${NEO4J_PASSWORD:-dev_neo4j_2024}
+      - NEO4J_PLUGINS=["apoc","graph-data-science"]
+      - NEO4J_apoc_export_file_enabled=true
+      - NEO4J_apoc_import_file_enabled=true
+      - NEO4J_apoc_import_file_use__neo4j__config=true
+      - NEO4J_ACCEPT_LICENSE_AGREEMENT=yes
+      - NEO4J_dbms_logs_debug_level=INFO
+    ports:
+      - "7475:7474"  # HTTP (different port)
+      - "7688:7687"  # Bolt (different port)
+    volumes:
+      - neo4j_dev_data:/data
+      - neo4j_dev_logs:/logs
+      - neo4j_dev_import:/var/lib/neo4j/import
+      - neo4j_dev_plugins:/plugins
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:7474/db/data/"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+    networks:
+      - itp-dev-network
+
+  # OpenWebUI - Development Mode
+  openwebui:
+    image: ghcr.io/open-webui/open-webui:main
+    container_name: itp-openwebui-dev
+    environment:
+      - OPENAI_API_BASE_URL=http://mcpo-proxy:7105/v1
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-dev-dummy-key}
+      - WEBUI_SECRET_KEY=${WEBUI_SECRET_KEY:-dev-secret-key}
+      - ENV=development
+      - LOG_LEVEL=DEBUG
+    volumes:
+      - openwebui_dev_data:/app/backend/data
+    ports:
+      - "7115:8080"
+    restart: unless-stopped
+    depends_on:
+      mcpo-proxy:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    networks:
+      - itp-dev-network
+
+  # Development Tools Container
+  dev-tools:
+    image: python:3.11-slim
+    container_name: itp-dev-tools
+    volumes:
+      - .:/workspace:rw
+      - dev_tools_cache:/root/.cache
+    working_dir: /workspace
+    command: tail -f /dev/null  # Keep container running
+    networks:
+      - itp-dev-network
+    environment:
+      - PYTHONPATH=/workspace
+
+# Networks
+networks:
+  itp-dev-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.21.0.0/16
+
+# Volumes (separate from production)
+volumes:
+  postgres_dev_data:
+    driver: local
+  redis_dev_data:
+    driver: local
+  openwebui_dev_data:
+    driver: local
+  neo4j_dev_data:
+    driver: local
+  neo4j_dev_logs:
+    driver: local
+  neo4j_dev_import:
+    driver: local
+  neo4j_dev_plugins:
+    driver: local
+  rag_dev_uploads:
+    driver: local
+  dev_tools_cache:
+    driver: local

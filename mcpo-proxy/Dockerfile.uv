@@ -1,0 +1,54 @@
+# Multi-stage build for MCPO Proxy with UV package manager
+FROM python:3.11-slim as builder
+
+WORKDIR /app
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    curl \
+    gcc \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install UV (10-100x faster than pip/poetry)
+RUN pip install uv
+
+# Copy dependency files
+COPY pyproject.toml uv.lock* ./
+
+# Create virtual environment and install dependencies with UV
+RUN uv venv /app/venv && \
+    /app/venv/bin/python -m uv pip install -r pyproject.toml
+
+# Production stage
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Install minimal runtime dependencies
+RUN apt-get update && apt-get install -y \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy virtual environment from builder
+COPY --from=builder /app/venv /app/venv
+
+# Copy application code
+COPY src/ ./src/
+COPY README.md ./
+
+# Create non-root user
+RUN useradd -m -u 1000 proxyuser && chown -R proxyuser:proxyuser /app
+USER proxyuser
+
+# Activate virtual environment
+ENV PATH="/app/venv/bin:$PATH"
+
+# Expose port
+EXPOSE 7105
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD curl -f http://localhost:7105/health || exit 1
+
+# Run the application
+CMD ["python", "-m", "src.main"]

@@ -1,0 +1,53 @@
+# Development Dockerfile for MCP Server with hot reloading and debugging
+FROM python:3.11-slim as base
+
+WORKDIR /app
+
+# Install system dependencies including debugging tools
+RUN apt-get update && apt-get install -y \
+    curl \
+    libpq-dev \
+    gcc \
+    vim \
+    htop \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install UV for faster package management
+RUN pip install uv
+
+# Development stage with debugging and hot reloading
+FROM base as development
+
+# Install development dependencies
+RUN pip install debugpy watchdog
+
+# Copy dependency files
+COPY pyproject.toml uv.lock* ./
+
+# Create virtual environment and install all dependencies (including dev)
+RUN uv venv /app/venv && \
+    /app/venv/bin/python -m uv pip install -e . && \
+    /app/venv/bin/python -m uv pip install debugpy pytest pytest-asyncio black isort
+
+# Copy application code
+COPY src/ ./src/
+COPY tests/ ./tests/
+COPY README.md ./
+
+# Create non-root user
+RUN useradd -m -u 1000 app && chown -R app:app /app
+USER app
+
+# Activate virtual environment
+ENV PATH="/app/venv/bin:$PATH"
+ENV PYTHONPATH="/app/src:$PATH"
+
+# Expose application and debug ports
+EXPOSE 7100 5678
+
+# Health check
+HEALTHCHECK --interval=10s --timeout=5s --start-period=5s --retries=3 \
+    CMD curl -f http://localhost:7100/health || exit 1
+
+# Default command with hot reloading
+CMD ["python", "-m", "debugpy", "--listen", "0.0.0.0:5678", "--wait-for-client", "-m", "src.main"]
