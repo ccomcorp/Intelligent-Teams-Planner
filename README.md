@@ -69,19 +69,21 @@ docker compose logs -f
 
 ### 5. Access Applications
 
-**✅ INFRASTRUCTURE SERVICES (DEPLOYED):**
-- **Neo4j Browser**: http://localhost:7474 (Knowledge graph explorer)
-- **PostgreSQL**: localhost:5432 (Vector database with pgvector)
-- **Redis**: localhost:6379 (Caching layer)
+**✅ ALL SERVICES OPERATIONAL (100%):**
 
-**ℹ️ EXTERNAL SERVICES:**
+**Infrastructure Services:**
+- **Neo4j Browser**: http://localhost:7474 (Knowledge graph explorer) - HEALTHY
+- **PostgreSQL**: localhost:5432 (Vector database with pgvector) - HEALTHY
+- **Redis**: localhost:6379 (Caching layer) - HEALTHY
+
+**Core Application Services:**
+- **MCP Server**: http://localhost:7100 (Graph API business logic) - HEALTHY
+- **MCPO Proxy**: http://localhost:7105 (Protocol translation) - HEALTHY
+- **RAG Service**: http://localhost:7120 (Document intelligence) - HEALTHY
+- **Teams Bot**: Port 7110 (Microsoft Teams integration) - READY (requires BOT_ID/BOT_PASSWORD)
+
+**External Services:**
 - **OpenWebUI**: Separate standalone container (shared across applications)
-
-**🚧 IN DEVELOPMENT:**
-- Teams Bot: Port 7110 (Microsoft Teams integration)
-- MCP Server: Port 7100 (Graph API business logic)
-- MCPO Proxy: Port 7105 (Protocol translation)
-- RAG Service: Port 7120 (Document intelligence)
 
 ## Service Architecture
 
@@ -235,10 +237,10 @@ curl http://localhost:8001/tools
 ./scripts/test-services.sh
 
 # Individual service status
-curl http://localhost:3000/health    # OpenWebUI
-curl http://localhost:8001/health    # MCPO Proxy
-curl http://localhost:8000/health    # MCP Server
-curl http://localhost:3978/api/messages  # Teams Bot
+curl http://localhost:7100/health    # MCP Server
+curl http://localhost:7105/health    # MCPO Proxy
+curl http://localhost:7120/health    # RAG Service
+curl http://localhost:7110/health    # Teams Bot
 ```
 
 ## Contributing

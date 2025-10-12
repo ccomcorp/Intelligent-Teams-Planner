@@ -31,11 +31,11 @@ class DynamicRouteGenerator:
     async def initialize(self):
         """Initialize dynamic routes based on discovered MCP tools"""
         try:
-            # Get available tools from MCP server
-            tools = await self.mcp_client.list_tools()
+            # Get available tools from MCP server with resilient handling
+            tools = await self._get_tools_safely()
 
             if not tools:
-                logger.warning("No MCP tools discovered for route generation")
+                logger.warning("No MCP tools discovered for route generation - starting with empty routes")
                 return
 
             # Generate routes for each tool
@@ -45,8 +45,22 @@ class DynamicRouteGenerator:
             logger.info("Dynamic routes initialized", tool_count=len(tools))
 
         except Exception as e:
-            logger.error("Failed to initialize dynamic routes", error=str(e))
-            raise
+            logger.warning("Failed to initialize dynamic routes - continuing with degraded functionality", error=str(e))
+            # Don't raise - allow startup to continue
+
+    async def _get_tools_safely(self) -> List[Dict[str, Any]]:
+        """Safely get tools from MCP client with timeout and error handling"""
+        try:
+            import asyncio
+            # Try to get tools with a short timeout
+            tools = await asyncio.wait_for(self.mcp_client.list_tools(), timeout=5.0)
+            return tools if tools else []
+        except asyncio.TimeoutError:
+            logger.warning("MCP client timeout while fetching tools")
+            return []
+        except Exception as e:
+            logger.warning("Failed to fetch tools from MCP client", error=str(e))
+            return []
 
     async def _create_tool_route(self, tool: Dict[str, Any]):
         """Create a FastAPI route for a specific MCP tool"""

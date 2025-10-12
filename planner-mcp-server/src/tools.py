@@ -2302,7 +2302,7 @@ class AnalyzeProjectRelationships(Tool):
                 "include_metrics": {
                     "type": "boolean",
                     "description": "Include relationship strength metrics",
-                    "default": true
+                    "default": True
                 }
             },
             "required": ["entity_type"]

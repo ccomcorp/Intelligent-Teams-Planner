@@ -1,0 +1,34 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    curl \
+    gcc \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy requirements file first for better caching
+COPY requirements-simple.txt ./
+
+# Install dependencies using pip
+RUN pip install --no-cache-dir -r requirements-simple.txt
+
+# Copy application code
+COPY src/ ./src/
+COPY manifest.json ./
+COPY README.md ./
+
+# Create non-root user
+RUN useradd -m -u 1000 botuser && chown -R botuser:botuser /app
+USER botuser
+
+# Expose port
+EXPOSE 7110
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD curl -f http://localhost:7110/health || exit 1
+
+# Run the application
+CMD ["python", "-m", "src.main"]

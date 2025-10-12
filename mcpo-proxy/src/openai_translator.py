@@ -26,8 +26,8 @@ class OpenAITranslator:
     async def initialize(self):
         """Initialize translator with tool patterns"""
         try:
-            # Get available tools from MCP server
-            await self.mcp_client.list_tools()
+            # Try to get available tools from MCP server (resilient)
+            await self._initialize_tools_safely()
 
             # Create patterns for intent recognition
             self.tool_patterns = [
@@ -74,8 +74,20 @@ class OpenAITranslator:
             logger.info("OpenAI translator initialized", patterns_count=len(self.tool_patterns))
 
         except Exception as e:
-            logger.error("Failed to initialize translator", error=str(e))
-            raise
+            logger.warning("Failed to initialize translator - continuing with limited functionality", error=str(e))
+            # Don't raise - allow startup to continue
+
+    async def _initialize_tools_safely(self):
+        """Safely initialize tools from MCP client"""
+        try:
+            import asyncio
+            # Try to list tools with a short timeout
+            await asyncio.wait_for(self.mcp_client.list_tools(), timeout=5.0)
+            logger.info("MCP tools initialized successfully")
+        except asyncio.TimeoutError:
+            logger.warning("MCP client timeout while listing tools during initialization")
+        except Exception as e:
+            logger.warning("Failed to list tools from MCP client during initialization", error=str(e))
 
     async def process_chat_completion(self, request) -> Dict[str, Any]:
         """Process OpenAI chat completion request"""

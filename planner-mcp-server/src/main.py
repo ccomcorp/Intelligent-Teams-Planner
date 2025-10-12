@@ -175,6 +175,22 @@ async def get_webhook_manager() -> WebhookSubscriptionManager:
     """Get webhook manager instance"""
     return webhook_manager
 
+# Root endpoint for MCP handshake
+@app.get("/")
+async def root():
+    """Root endpoint for MCP protocol handshake"""
+    return {
+        "name": "Intelligent Teams Planner MCP Server",
+        "version": "2.0.0",
+        "protocol_version": "1.0",
+        "description": "Model Context Protocol server for Microsoft Graph API integration",
+        "capabilities": {
+            "tools": True,
+            "authentication": True,
+            "webhooks": True
+        }
+    }
+
 # Health check
 @app.get("/health")
 async def health_check():

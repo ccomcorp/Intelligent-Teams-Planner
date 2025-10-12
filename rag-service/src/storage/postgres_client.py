@@ -22,16 +22,27 @@ class PostgresClient:
     """
 
     def __init__(self, database_url: str, min_size: int = 5, max_size: int = 20):
-        self.database_url = database_url
+        # Convert SQLAlchemy URL to asyncpg-compatible URL
+        self.database_url = self._convert_sqlalchemy_url(database_url)
         self.min_size = min_size
         self.max_size = max_size
         self.pool: Optional[asyncpg.Pool] = None
 
         # Parse database URL for logging (without credentials)
-        parsed = urlparse(database_url)
+        parsed = urlparse(self.database_url)
         self.host = parsed.hostname
         self.port = parsed.port
         self.database = parsed.path.lstrip('/')
+
+    def _convert_sqlalchemy_url(self, url: str) -> str:
+        """Convert SQLAlchemy URL to asyncpg-compatible URL"""
+        if url.startswith('postgresql+asyncpg://'):
+            # Remove the +asyncpg part to make it compatible with asyncpg
+            return url.replace('postgresql+asyncpg://', 'postgresql://')
+        elif url.startswith('postgres+asyncpg://'):
+            # Remove the +asyncpg part to make it compatible with asyncpg
+            return url.replace('postgres+asyncpg://', 'postgres://')
+        return url
 
     async def _init_connection(self, conn: asyncpg.Connection) -> None:
         """Initialize connection with pgvector support"""

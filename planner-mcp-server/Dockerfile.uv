@@ -14,12 +14,15 @@ RUN apt-get update && apt-get install -y \
 RUN pip install uv
 
 # Copy dependency files
-COPY pyproject.toml uv.lock* ./
+COPY pyproject.toml uv.lock* requirements.txt ./
 
 # Create virtual environment and install dependencies with UV
 RUN uv venv /app/venv && \
     . /app/venv/bin/activate && \
-    uv pip install -e .
+    uv pip install -r requirements.txt && \
+    (uv pip uninstall psycopg2 || true) && \
+    (uv pip uninstall psycopg2-binary || true) && \
+    (uv pip uninstall psycopg2-cffi || true)
 
 # Production stage
 FROM python:3.11-slim

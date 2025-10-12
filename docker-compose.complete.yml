@@ -1,0 +1,237 @@
+version: '3.8'
+
+# Complete Application Stack for Intelligent Teams Planner
+# All services including infrastructure and application components
+
+services:
+  # Core Database - PostgreSQL with pgvector
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: itp-postgres
+    environment:
+      POSTGRES_DB: intelligent_teams_planner
+      POSTGRES_USER: itp_user
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-itp_password_2024}
+      POSTGRES_INITDB_ARGS: "--auth-host=scram-sha-256"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./database/init:/docker-entrypoint-initdb.d
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U itp_user -d intelligent_teams_planner"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - itp-network
+    restart: unless-stopped
+
+  # Redis for caching and session management
+  redis:
+    image: redis:7-alpine
+    container_name: itp-redis
+    command: redis-server --requirepass ${REDIS_PASSWORD:-redis_password_2024}
+    volumes:
+      - redis_data:/data
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "--raw", "incr", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - itp-network
+    restart: unless-stopped
+
+  # Neo4j Knowledge Graph Database
+  neo4j:
+    image: neo4j:5.15-community
+    container_name: itp-neo4j
+    environment:
+      - NEO4J_AUTH=neo4j/${NEO4J_PASSWORD:-neo4j_password_2024}
+      - NEO4J_PLUGINS=["apoc","graph-data-science"]
+      - NEO4J_apoc_export_file_enabled=true
+      - NEO4J_apoc_import_file_enabled=true
+      - NEO4J_apoc_import_file_use__neo4j__config=true
+      - NEO4J_ACCEPT_LICENSE_AGREEMENT=yes
+    ports:
+      - "7474:7474"  # HTTP
+      - "7687:7687"  # Bolt
+    volumes:
+      - neo4j_data:/data
+      - neo4j_logs:/logs
+      - neo4j_import:/var/lib/neo4j/import
+      - neo4j_plugins:/plugins
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:7474/db/data/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+    networks:
+      - itp-network
+
+  # MCP Server - Microsoft Graph API Integration (Port 7100)
+  mcp-server:
+    build:
+      context: ./planner-mcp-server
+      dockerfile: Dockerfile.simple
+    container_name: itp-mcp-server
+    environment:
+      - PORT=7100
+      - DATABASE_URL=postgresql+asyncpg://itp_user:${POSTGRES_PASSWORD:-itp_password_2024}@postgres:5432/intelligent_teams_planner
+      - REDIS_URL=redis://redis:6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-redis_password_2024}
+      - ENCRYPTION_KEY=${ENCRYPTION_KEY:-12345678901234567890123456789012}
+      - TESTING_MODE=false
+      - LOG_LEVEL=INFO
+      - MICROSOFT_CLIENT_ID=${MICROSOFT_CLIENT_ID}
+      - MICROSOFT_CLIENT_SECRET=${MICROSOFT_CLIENT_SECRET}
+      - MICROSOFT_TENANT_ID=${MICROSOFT_TENANT_ID}
+    ports:
+      - "7200:7100"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:7100/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+    networks:
+      - itp-network
+
+  # MCPO Proxy - Protocol Translation Layer (Port 7105)
+  mcpo-proxy:
+    build:
+      context: ./mcpo-proxy
+      dockerfile: Dockerfile.simple
+    container_name: itp-mcpo-proxy
+    environment:
+      - PORT=7105
+      - MCP_SERVER_URL=http://mcp-server:7100
+      - REDIS_URL=redis://redis:6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-redis_password_2024}
+      - LOG_LEVEL=INFO
+    ports:
+      - "7205:7105"
+    depends_on:
+      mcp-server:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:7105/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+    networks:
+      - itp-network
+
+  # Teams Bot - Microsoft Teams Integration (Port 7110)
+  teams-bot:
+    build:
+      context: ./teams-bot
+      dockerfile: Dockerfile.simple
+    container_name: itp-teams-bot
+    environment:
+      - PORT=7110
+      - BOT_ID=${BOT_ID}
+      - BOT_PASSWORD=${BOT_PASSWORD}
+      - OPENWEBUI_URL=http://host.docker.internal:7115
+      - REDIS_URL=redis://redis:6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-redis_password_2024}
+      - LOG_LEVEL=INFO
+    ports:
+      - "7210:7110"
+    depends_on:
+      mcpo-proxy:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:7110/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+    networks:
+      - itp-network
+
+  # RAG Service - Document Intelligence (Port 7120)
+  rag-service:
+    build:
+      context: ./rag-service
+      dockerfile: Dockerfile
+    container_name: itp-rag-service
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://itp_user:${POSTGRES_PASSWORD:-itp_password_2024}@postgres:5432/intelligent_teams_planner
+      - REDIS_URL=redis://redis:6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-redis_password_2024}
+      - PORT=7120
+      - LOG_LEVEL=INFO
+      - MAX_FILE_SIZE_MB=100
+      - CHUNK_SIZE=1000
+      - CHUNK_OVERLAP=200
+      - EMBEDDING_MODEL=sentence-transformers/all-MiniLM-L6-v2
+      - OPENWEBUI_ENABLED=true
+      - TEAMS_ENABLED=true
+      - PLANNER_ENABLED=true
+      - MICROSOFT_CLIENT_ID=${MICROSOFT_CLIENT_ID}
+      - MICROSOFT_CLIENT_SECRET=${MICROSOFT_CLIENT_SECRET}
+      - MICROSOFT_TENANT_ID=${MICROSOFT_TENANT_ID}
+    volumes:
+      - rag_uploads:/app/uploads
+      - rag_cache:/app/cache
+    ports:
+      - "7220:7120"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:7120/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    restart: unless-stopped
+    networks:
+      - itp-network
+
+# Networks
+networks:
+  itp-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.24.0.0/16
+
+# Volumes
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+  neo4j_data:
+    driver: local
+  neo4j_logs:
+    driver: local
+  neo4j_import:
+    driver: local
+  neo4j_plugins:
+    driver: local
+  rag_uploads:
+    driver: local
+  rag_cache:
+    driver: local

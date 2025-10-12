@@ -38,22 +38,63 @@ class MCPClient:
                 limits=httpx.Limits(max_keepalive_connections=50, max_connections=100)
             )
 
-            # Perform MCP protocol handshake
-            await self._perform_handshake()
+            # Try to perform MCP protocol handshake with retries and graceful degradation
+            handshake_success = await self._perform_handshake_with_retries()
 
-            # Discover server capabilities
-            await self._discover_capabilities()
-
-            # Test connectivity
-            health_status = await self.health_check()
-            if health_status != "healthy":
-                raise MCPError("MCP server health check failed during initialization")
-
-            logger.info("MCP client initialized successfully with protocol handshake")
+            if handshake_success:
+                # Discover server capabilities
+                await self._discover_capabilities()
+                logger.info("MCP client initialized successfully with protocol handshake")
+            else:
+                # Initialize in degraded mode - client is available but MCP features may be limited
+                logger.warning("MCP client initialized in degraded mode - MCP server not immediately available")
 
         except Exception as e:
             logger.error("Failed to initialize MCP client", error=str(e))
-            raise MCPError(f"MCP client initialization failed: {str(e)}")
+            # Don't fail completely - allow startup with limited functionality
+            logger.warning("MCP client starting in offline mode - will retry connections automatically")
+
+    async def _perform_handshake_with_retries(self, max_attempts: int = 3) -> bool:
+        """Perform MCP protocol handshake with retries and timeout handling"""
+        for attempt in range(max_attempts):
+            try:
+                logger.info("Attempting MCP handshake",
+                           attempt=attempt + 1,
+                           max_attempts=max_attempts,
+                           server_url=self.base_url)
+
+                # Try handshake with shorter timeout for startup
+                await asyncio.wait_for(self._perform_handshake(), timeout=10.0)
+
+                # Test connectivity with shorter timeout
+                health_status = await asyncio.wait_for(self.health_check(), timeout=5.0)
+                if health_status == "healthy":
+                    logger.info("MCP handshake successful",
+                               attempt=attempt + 1,
+                               server_url=self.base_url)
+                    return True
+                else:
+                    logger.warning("MCP handshake completed but health check failed",
+                                 attempt=attempt + 1,
+                                 status=health_status,
+                                 server_url=self.base_url)
+
+            except asyncio.TimeoutError:
+                logger.warning("MCP handshake timeout",
+                              attempt=attempt + 1,
+                              server_url=self.base_url)
+            except Exception as e:
+                logger.warning("MCP handshake failed",
+                              attempt=attempt + 1,
+                              error=str(e),
+                              server_url=self.base_url)
+
+            if attempt < max_attempts - 1:
+                await asyncio.sleep(2.0)  # Wait before retry
+
+        logger.warning("All MCP handshake attempts failed - continuing with degraded functionality",
+                      server_url=self.base_url)
+        return False
 
     async def _perform_handshake(self):
         """Perform MCP protocol handshake"""

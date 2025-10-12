@@ -63,7 +63,7 @@ async def lifespan(app: FastAPI):
         await proxy_cache.initialize()
 
         # Initialize MCP client
-        mcp_server_url = os.getenv("MCP_SERVER_URL", "http://planner-mcp-server:8000")
+        mcp_server_url = os.getenv("MCP_SERVER_URL") or os.getenv("PLANNER_MCP_URL", "http://planner-mcp-server:7100")
         mcp_client = MCPClient(mcp_server_url)
         await mcp_client.initialize()
 
@@ -512,7 +512,7 @@ async def get_proxy_info(
             "name": "MCPO Proxy",
             "version": "2.0.0",
             "description": "OpenWebUI to Model Context Protocol translation layer with dynamic routes",
-            "mcp_server_url": os.getenv("MCP_SERVER_URL", "http://planner-mcp-server:8000"),
+            "mcp_server_url": os.getenv("MCP_SERVER_URL") or os.getenv("PLANNER_MCP_URL", "http://planner-mcp-server:7100"),
             "supported_endpoints": [
                 "/v1/chat/completions",
                 "/v1/models",

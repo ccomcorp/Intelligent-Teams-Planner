@@ -10,7 +10,7 @@ import asyncio
 import asyncpg
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
-from sqlalchemy import String, DateTime, Text, JSON, Boolean, Integer, func
+from sqlalchemy import String, DateTime, Text, JSON, Boolean, Integer, func, text
 from sqlalchemy.dialects.postgresql import UUID
 import structlog
 import uuid
@@ -146,6 +146,19 @@ class Database:
     async def initialize(self):
         """Initialize database connection and create tables"""
         try:
+            # Validate PostgreSQL driver configuration
+            if "postgresql" in self.database_url:
+                if "+asyncpg" not in self.database_url:
+                    logger.warning("Database URL missing +asyncpg driver specification, adding it")
+                    self.database_url = self.database_url.replace("postgresql://", "postgresql+asyncpg://")
+
+                # Ensure asyncpg is available
+                try:
+                    import asyncpg
+                    logger.info("✅ asyncpg driver available")
+                except ImportError:
+                    raise DatabaseError("asyncpg driver not available - required for async PostgreSQL connections")
+
             # Create async engine with database-specific parameters
             engine_kwargs = {
                 "echo": os.getenv("DB_ECHO", "false").lower() == "true",
@@ -160,6 +173,7 @@ class Database:
                     "pool_recycle": 3600
                 })
 
+            logger.info(f"Creating async engine with URL: {self.database_url.split('@')[0]}@***")
             self.engine = create_async_engine(self.database_url, **engine_kwargs)
 
             # Create session factory
@@ -217,7 +231,7 @@ class Database:
         """Check database health"""
         try:
             async with self.session_factory() as session:
-                result = await session.execute("SELECT 1")
+                result = await session.execute(text("SELECT 1"))
                 result.scalar()
                 return "healthy"
         except Exception as e:
