@@ -23,8 +23,9 @@ echo "🌐 Starting OpenWebUI..."
 docker run -d \
   --name openwebui \
   -p 7115:8080 \
+  --network intelligent-teams-planner_itp-simple-network \
   -e OPENAI_API_KEY="${OPENAI_API_KEY:-demo-key}" \
-  -e OPENAI_API_BASE_URL="${OPENAI_API_BASE_URL:-http://host.docker.internal:7105/v1}" \
+  -e OPENAI_API_BASE_URL="${OPENAI_API_BASE_URL:-http://itp-mcpo-proxy-simple:7105/v1}" \
   -e WEBUI_SECRET_KEY="${WEBUI_SECRET_KEY:-itp-secret-key-2024}" \
   -e ENV=production \
   -v openwebui_data:/app/backend/data \
@@ -43,7 +44,7 @@ if curl -f http://localhost:7115/ >/dev/null 2>&1; then
     echo "   • URL: http://localhost:7115"
     echo "   • Container: openwebui"
     echo "   • Status: Standalone (shared across applications)"
-    echo "   • Backend: Connected to MCPO Proxy (localhost:7105)"
+    echo "   • Backend: Connected to MCPO Proxy (itp-mcpo-proxy-simple:7105)"
     echo ""
     echo "🔧 Management Commands:"
     echo "   • View logs:  docker logs -f openwebui"
