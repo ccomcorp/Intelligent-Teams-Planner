@@ -272,7 +272,7 @@ async def list_models():
     )
 
 
-@app.post("/v1/chat/completions", response_model=ChatCompletionResponse)
+@app.post("/v1/chat/completions")
 async def create_chat_completion(
     request: ChatCompletionRequest,
     translator: OpenAITranslator = Depends(get_translator)
@@ -284,7 +284,36 @@ async def create_chat_completion(
         # Translate OpenAI request to MCP tool calls
         response = await translator.process_chat_completion(request)
 
-        return response
+        # Handle streaming vs non-streaming response
+        if request.stream:
+            # Return streaming response for OpenWebUI compatibility
+            from fastapi.responses import StreamingResponse
+            import json
+
+            def create_sse_response():
+                # Convert complete response to streaming format
+                chunk = {
+                    "id": response["id"],
+                    "object": "chat.completion.chunk",
+                    "created": response["created"],
+                    "model": response["model"],
+                    "choices": [{
+                        "index": 0,
+                        "delta": {"content": response["choices"][0]["message"]["content"]},
+                        "finish_reason": "stop"
+                    }]
+                }
+                yield f"data: {json.dumps(chunk)}\n\n"
+                yield "data: [DONE]\n\n"
+
+            return StreamingResponse(
+                create_sse_response(),
+                media_type="text/plain",
+                headers={"Cache-Control": "no-cache", "Connection": "keep-alive"}
+            )
+        else:
+            # Return complete response
+            return response
 
     except Exception as e:
         logger.error("Error processing chat completion", error=str(e))
