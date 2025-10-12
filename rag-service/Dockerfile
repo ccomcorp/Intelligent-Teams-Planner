@@ -12,19 +12,11 @@ RUN apt-get update && apt-get install -y \
     tesseract-ocr \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Poetry
-RUN pip install poetry==1.8.2
+# Copy requirements file first for better caching
+COPY requirements.txt ./
 
-# Configure Poetry: Don't create a virtual environment, install dependencies globally
-ENV POETRY_NO_INTERACTION=1 \
-    POETRY_VENV_IN_PROJECT=1 \
-    POETRY_CACHE_DIR=/tmp/poetry_cache
-
-# Copy Poetry files first for better caching
-COPY pyproject.toml poetry.lock* ./
-
-# Install dependencies using Poetry
-RUN poetry install --only=main && rm -rf $POETRY_CACHE_DIR
+# Install dependencies using pip
+RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application code
 COPY src/ ./src/

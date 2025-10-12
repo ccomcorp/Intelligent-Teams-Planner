@@ -17,7 +17,8 @@ COPY pyproject.toml uv.lock* ./
 
 # Create virtual environment and install dependencies with UV
 RUN uv venv /app/venv && \
-    /app/venv/bin/python -m uv pip install -r pyproject.toml
+    . /app/venv/bin/activate && \
+    uv pip install -e .
 
 # Production stage
 FROM python:3.11-slim
