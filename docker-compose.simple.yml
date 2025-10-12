@@ -73,26 +73,8 @@ services:
     networks:
       - itp-simple-network
 
-  # OpenWebUI - Central Conversational Hub
-  openwebui:
-    image: ghcr.io/open-webui/open-webui:main
-    container_name: itp-openwebui-simple
-    environment:
-      - OPENAI_API_KEY=${OPENAI_API_KEY:-demo-key}
-      - WEBUI_SECRET_KEY=${WEBUI_SECRET_KEY:-your-secret-key}
-      - ENV=production
-    volumes:
-      - openwebui_simple_data:/app/backend/data
-    ports:
-      - "7115:8080"
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080/"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-    networks:
-      - itp-simple-network
+# OpenWebUI removed - using separate standalone container
+# Container ID: f9cc2bf3b1e6fe9752c9d790d535ac25826eb0f13cf270af4f99709e08e93079
 
 # Networks
 networks:
@@ -108,8 +90,7 @@ volumes:
     driver: local
   redis_simple_data:
     driver: local
-  openwebui_simple_data:
-    driver: local
+# openwebui_simple_data removed - using separate container
   neo4j_simple_data:
     driver: local
   neo4j_simple_logs:

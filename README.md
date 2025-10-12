@@ -54,28 +54,42 @@ cp .env.example .env
 ### 4. Launch Services
 
 ```bash
-# Start all services
+# Quick deployment (infrastructure only)
+./scripts/deployment/deploy-infrastructure.sh
+
+# OR full service stack (when services are ready)
 docker compose up -d
 
-# Check service health
-./scripts/test-services.sh
+# Check service status
+./scripts/deployment/status.sh
 
 # View logs
 docker compose logs -f
 ```
 
-### 5. Access OpenWebUI
+### 5. Access Applications
 
-- Open http://localhost:3000
-- Configure MCPO Proxy endpoint: `http://localhost:8001`
-- Start conversational Planner management
+**✅ INFRASTRUCTURE SERVICES (DEPLOYED):**
+- **Neo4j Browser**: http://localhost:7474 (Knowledge graph explorer)
+- **PostgreSQL**: localhost:5432 (Vector database with pgvector)
+- **Redis**: localhost:6379 (Caching layer)
+
+**ℹ️ EXTERNAL SERVICES:**
+- **OpenWebUI**: Separate standalone container (shared across applications)
+
+**🚧 IN DEVELOPMENT:**
+- Teams Bot: Port 7110 (Microsoft Teams integration)
+- MCP Server: Port 7100 (Graph API business logic)
+- MCPO Proxy: Port 7105 (Protocol translation)
+- RAG Service: Port 7120 (Document intelligence)
 
 ## Service Architecture
 
-### OpenWebUI (Port 3000)
+### OpenWebUI (Port 7115) ✅ RUNNING
 - **Purpose**: Central conversational interface
-- **Features**: Chat, RAG, model management
-- **Integration**: Connects to MCPO Proxy for Planner tools
+- **Features**: Chat, RAG, model management, file uploads
+- **Status**: Deployed and accessible at http://localhost:7115
+- **Integration**: Ready for MCPO Proxy connection
 
 ### MCPO Proxy (Port 8001)
 - **Purpose**: Protocol translation layer
