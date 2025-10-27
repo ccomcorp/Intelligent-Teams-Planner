@@ -81,6 +81,10 @@ services:
     container_name: itp-planner-mcp-simple
     ports:
       - "7100:7100"
+    volumes:
+      - ./planner-mcp-server/src:/app/src     # Source code (read-write for development)
+      - planner_mcp_logs:/app/logs             # Application logs
+      - planner_mcp_data:/app/data             # Application data & cache
     environment:
       - DATABASE_URL=postgresql+asyncpg://itp_user:${POSTGRES_PASSWORD:-itp_password_2024}@postgres:5432/intelligent_teams_planner
       - NEO4J_URI=bolt://neo4j:7687
@@ -118,6 +122,10 @@ services:
     container_name: itp-mcpo-proxy-simple
     ports:
       - "7105:7105"
+    volumes:
+      - ./mcpo-proxy/src:/app/src             # Source code (read-write for development)
+      - mcpo_proxy_logs:/app/logs             # Application logs
+      - mcpo_proxy_data:/app/data             # Application data & cache
     environment:
       - PLANNER_MCP_URL=http://planner-mcp-server:7100
       - REDIS_URL=redis://:${REDIS_PASSWORD:-redis_password_2024}@redis:6379
@@ -145,6 +153,10 @@ services:
     container_name: itp-teams-bot-simple
     ports:
       - "7110:7110"
+    volumes:
+      - ./teams-bot/src:/app/src              # Source code (read-write for development)
+      - teams_bot_logs:/app/logs              # Application logs
+      - teams_bot_data:/app/data              # Application data & cache
     environment:
       - BOT_ID=${BOT_ID:-test-bot-id}
       - BOT_PASSWORD=${BOT_PASSWORD:-test-bot-password}
@@ -179,6 +191,11 @@ services:
     container_name: itp-rag-service-simple
     ports:
       - "7120:7120"
+    volumes:
+      - ./rag-service/src:/app/src            # Source code (read-write for development)
+      - rag_service_logs:/app/logs            # Application logs
+      - rag_service_data:/app/data            # Application data, embeddings & cache
+      - rag_service_uploads:/app/uploads      # Uploaded documents
     environment:
       - DATABASE_URL=postgresql+asyncpg://itp_user:${POSTGRES_PASSWORD:-itp_password_2024}@postgres:5432/intelligent_teams_planner
       - NEO4J_URI=bolt://neo4j:7687
@@ -219,6 +236,7 @@ networks:
 
 # Volumes
 volumes:
+  # Database volumes
   postgres_simple_data:
     driver: local
   redis_simple_data:
@@ -231,4 +249,24 @@ volumes:
   neo4j_simple_import:
     driver: local
   neo4j_simple_plugins:
+    driver: local
+
+  # Application service volumes
+  planner_mcp_logs:
+    driver: local
+  planner_mcp_data:
+    driver: local
+  mcpo_proxy_logs:
+    driver: local
+  mcpo_proxy_data:
+    driver: local
+  teams_bot_logs:
+    driver: local
+  teams_bot_data:
+    driver: local
+  rag_service_logs:
+    driver: local
+  rag_service_data:
+    driver: local
+  rag_service_uploads:
     driver: local

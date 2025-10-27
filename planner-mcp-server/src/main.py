@@ -17,6 +17,7 @@ import asyncio
 
 from .database import Database
 from .auth import AuthService
+from .session_auth import SessionAuthManager
 from .graph_client import GraphAPIClient
 from .tools import ToolRegistry, Tool, ToolResult
 from .cache import CacheService
@@ -35,6 +36,7 @@ logger = structlog.get_logger(__name__)
 # Global services
 database: Database = None
 auth_service: AuthService = None
+session_auth_manager: SessionAuthManager = None
 graph_client: GraphAPIClient = None
 cache_service: CacheService = None
 tool_registry: ToolRegistry = None
@@ -43,7 +45,7 @@ webhook_manager: WebhookSubscriptionManager = None
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan management"""
-    global database, auth_service, graph_client, cache_service, tool_registry, webhook_manager
+    global database, auth_service, session_auth_manager, graph_client, cache_service, tool_registry, webhook_manager
 
     try:
         # Initialize database
@@ -66,11 +68,15 @@ async def lifespan(app: FastAPI):
             client_secret=os.getenv("MICROSOFT_CLIENT_SECRET", "test-client-secret"),
             tenant_id=os.getenv("MICROSOFT_TENANT_ID", "test-tenant-id"),
             cache_service=cache_service,
+            redirect_uri=os.getenv("MICROSOFT_REDIRECT_URI", "http://localhost:7100/auth/callback"),
             testing_mode=testing_mode
         )
 
         # Initialize Graph API client
         graph_client = GraphAPIClient(auth_service, cache_service)
+
+        # Initialize session authentication manager
+        session_auth_manager = SessionAuthManager(cache_service, auth_service)
 
         # Initialize tool registry
         tool_registry = ToolRegistry(graph_client, database, cache_service)
@@ -138,6 +144,8 @@ class MCPToolCall(BaseModel):
     """MCP tool call request"""
     name: str
     arguments: Dict[str, Any] = Field(default_factory=dict)
+    session_id: Optional[str] = Field(default="default", description="Session ID for tracking partial requests")
+    user_id: Optional[str] = Field(default="default", description="User ID for authentication context")
 
 class MCPToolResponse(BaseModel):
     """MCP tool response"""
@@ -174,6 +182,10 @@ async def get_tool_registry() -> ToolRegistry:
 async def get_webhook_manager() -> WebhookSubscriptionManager:
     """Get webhook manager instance"""
     return webhook_manager
+
+async def get_session_auth_manager() -> SessionAuthManager:
+    """Get session auth manager instance"""
+    return session_auth_manager
 
 # Root endpoint for MCP handshake
 @app.get("/")
@@ -280,15 +292,55 @@ async def list_tools(
 @app.post("/tools/call", response_model=MCPToolResponse)
 async def call_tool(
     tool_call: MCPToolCall,
-    tool_registry: ToolRegistry = Depends(get_tool_registry)
+    tool_registry: ToolRegistry = Depends(get_tool_registry),
+    session_auth: SessionAuthManager = Depends(get_session_auth_manager),
+    auth_service: AuthService = Depends(get_auth_service)
 ):
-    """Execute a tool call"""
+    """Execute a tool call with session-based authentication and required field checking"""
     try:
-        logger.info("Executing tool", tool=tool_call.name, arguments=tool_call.arguments)
+        session_id = tool_call.session_id or "default"
+        provided_user_id = tool_call.user_id
+
+        # Validate session and get authenticated user
+        if session_id != "default":
+            session_data = await session_auth.validate_session(session_id)
+            if not session_data:
+                # Generate login URL for re-authentication
+                try:
+                    user_id_for_auth = provided_user_id or "default"
+                    login_url = await auth_service.get_login_url(user_id_for_auth)
+
+                    return MCPToolResponse(
+                        success=False,
+                        error="Session expired. Please re-authenticate to continue.",
+                        metadata={
+                            "requires_authentication": True,
+                            "session_id": session_id,
+                            "login_url": login_url,
+                            "user_id": user_id_for_auth,
+                            "action_required": "Please visit the login_url to re-authenticate"
+                        }
+                    )
+                except Exception as login_error:
+                    logger.error("Error generating login URL for expired session", error=str(login_error))
+                    return MCPToolResponse(
+                        success=False,
+                        error="Session expired and unable to generate login URL. Please check authentication service.",
+                        metadata={"requires_authentication": True, "session_id": session_id}
+                    )
+            authenticated_user_id = session_data["user_id"]
+        else:
+            # For backward compatibility, try to use provided user_id or default
+            authenticated_user_id = provided_user_id or "default"
+
+        logger.info("Executing tool", tool=tool_call.name, arguments=tool_call.arguments,
+                   session_id=session_id, authenticated_user=authenticated_user_id)
 
         result = await tool_registry.execute_tool(
             tool_call.name,
-            tool_call.arguments
+            tool_call.arguments,
+            authenticated_user_id,
+            session_id
         )
 
         return MCPToolResponse(
@@ -301,6 +353,263 @@ async def call_tool(
     except Exception as e:
         logger.error("Error executing tool", tool=tool_call.name, error=str(e))
         return MCPToolResponse(
+            success=False,
+            error=str(e)
+        )
+
+# Required Fields Completion Model
+class MCPFieldCompletion(BaseModel):
+    """MCP field completion request"""
+    session_id: str = Field(description="Session ID from the partial request")
+    tool_name: str = Field(description="Tool name from the partial request")
+    provided_values: Dict[str, Any] = Field(default_factory=dict, description="Missing field values")
+    user_id: Optional[str] = Field(default="default", description="User ID for authentication context")
+
+@app.post("/tools/complete", response_model=MCPToolResponse)
+async def complete_partial_request(
+    completion: MCPFieldCompletion,
+    tool_registry: ToolRegistry = Depends(get_tool_registry)
+):
+    """Complete a partial request by providing missing field values"""
+    try:
+        logger.info("Completing partial request", session_id=completion.session_id,
+                   tool=completion.tool_name, provided_values=completion.provided_values)
+
+        result = await tool_registry.complete_partial_request(
+            completion.session_id,
+            completion.tool_name,
+            completion.provided_values,
+            completion.user_id or "default"
+        )
+
+        return MCPToolResponse(
+            success=result.success,
+            content=result.content,
+            error=result.error,
+            metadata=result.metadata
+        )
+
+    except Exception as e:
+        logger.error("Error completing partial request", session_id=completion.session_id,
+                    tool=completion.tool_name, error=str(e))
+        return MCPToolResponse(
+            success=False,
+            error=str(e)
+        )
+
+# Session Management Endpoints
+
+class SessionRequest(BaseModel):
+    """Session management request"""
+    user_id: str = Field(description="User ID to create session for")
+    session_timeout: Optional[int] = Field(default=None, description="Session timeout in seconds (optional)")
+
+class SessionResponse(BaseModel):
+    """Session management response"""
+    success: bool
+    session_id: Optional[str] = None
+    message: Optional[str] = None
+    expires_at: Optional[str] = None
+    error: Optional[str] = None
+    metadata: Optional[Dict[str, Any]] = None
+
+@app.post("/session/create", response_model=SessionResponse)
+async def create_session(
+    request: SessionRequest,
+    session_auth: SessionAuthManager = Depends(get_session_auth_manager)
+):
+    """Create a new authenticated session for a user"""
+    try:
+        session_id = await session_auth.create_authenticated_session(
+            request.user_id,
+            request.session_timeout
+        )
+
+        if session_id:
+            session_info = await session_auth.get_session_info(session_id)
+            return SessionResponse(
+                success=True,
+                session_id=session_id,
+                message="Session created successfully",
+                expires_at=session_info.get("expires_at") if session_info else None
+            )
+        else:
+            return SessionResponse(
+                success=False,
+                error="Failed to create session. User may not be authenticated."
+            )
+
+    except Exception as e:
+        logger.error("Error creating session", user_id=request.user_id, error=str(e))
+        return SessionResponse(
+            success=False,
+            error=str(e)
+        )
+
+@app.get("/session/{session_id}", response_model=SessionResponse)
+async def get_session_info(
+    session_id: str,
+    session_auth: SessionAuthManager = Depends(get_session_auth_manager)
+):
+    """Get information about a session"""
+    try:
+        session_info = await session_auth.get_session_info(session_id)
+
+        if session_info:
+            return SessionResponse(
+                success=True,
+                session_id=session_id,
+                message="Session is valid",
+                expires_at=session_info.get("expires_at")
+            )
+        else:
+            return SessionResponse(
+                success=False,
+                error="Session not found or expired"
+            )
+
+    except Exception as e:
+        logger.error("Error getting session info", session_id=session_id[:8], error=str(e))
+        return SessionResponse(
+            success=False,
+            error=str(e)
+        )
+
+@app.delete("/session/{session_id}", response_model=SessionResponse)
+async def invalidate_session(
+    session_id: str,
+    session_auth: SessionAuthManager = Depends(get_session_auth_manager)
+):
+    """Invalidate a session (logout)"""
+    try:
+        success = await session_auth.invalidate_session(session_id)
+
+        if success:
+            return SessionResponse(
+                success=True,
+                message="Session invalidated successfully"
+            )
+        else:
+            return SessionResponse(
+                success=False,
+                error="Session not found"
+            )
+
+    except Exception as e:
+        logger.error("Error invalidating session", session_id=session_id[:8], error=str(e))
+        return SessionResponse(
+            success=False,
+            error=str(e)
+        )
+
+@app.post("/session/{session_id}/close", response_model=SessionResponse)
+async def close_session_on_browser_exit(
+    session_id: str,
+    session_auth: SessionAuthManager = Depends(get_session_auth_manager)
+):
+    """
+    Optimized endpoint for browser window close events
+    This endpoint is designed to work with navigator.sendBeacon for reliable cleanup
+    """
+    try:
+        success = await session_auth.invalidate_session(session_id)
+
+        # Always return success for browser close events to avoid blocking page unload
+        # Log the actual result but don't fail the request
+        if success:
+            logger.info("Session closed on browser exit", session_id=session_id[:8])
+        else:
+            logger.warning("Session already expired/invalid on browser exit", session_id=session_id[:8])
+
+        return SessionResponse(
+            success=True,
+            message="Session close request processed"
+        )
+
+    except Exception as e:
+        # Always return success for browser close to avoid blocking page unload
+        logger.error("Error processing browser session close", session_id=session_id[:8], error=str(e))
+        return SessionResponse(
+            success=True,
+            message="Session close request processed with error"
+        )
+
+@app.post("/session/{session_id}/activity", response_model=SessionResponse)
+async def update_session_activity(
+    session_id: str,
+    session_auth: SessionAuthManager = Depends(get_session_auth_manager)
+):
+    """
+    Update browser activity for session management
+    This endpoint can be called periodically by the client to maintain session
+    """
+    try:
+        success = await session_auth.update_browser_activity(session_id)
+
+        if success:
+            return SessionResponse(
+                success=True,
+                message="Session activity updated successfully"
+            )
+        else:
+            return SessionResponse(
+                success=False,
+                error="Session not found or expired"
+            )
+
+    except Exception as e:
+        logger.error("Error updating session activity", session_id=session_id[:8], error=str(e))
+        return SessionResponse(
+            success=False,
+            error=str(e)
+        )
+
+@app.get("/session/{session_id}/check", response_model=SessionResponse)
+async def check_session_with_reauth(
+    session_id: str,
+    user_id: str = "default",
+    session_auth: SessionAuthManager = Depends(get_session_auth_manager),
+    auth_service: AuthService = Depends(get_auth_service)
+):
+    """
+    Check session status and provide re-authentication information if needed
+    This endpoint helps clients handle session expiration gracefully
+    """
+    try:
+        session_info = await session_auth.get_session_info(session_id)
+
+        if session_info:
+            return SessionResponse(
+                success=True,
+                session_id=session_id,
+                message="Session is valid and active",
+                expires_at=session_info.get("expires_at")
+            )
+        else:
+            # Session is expired or invalid, provide re-authentication info
+            try:
+                login_url = await auth_service.get_login_url(user_id)
+
+                return SessionResponse(
+                    success=False,
+                    error="Session expired or invalid. Re-authentication required.",
+                    metadata={
+                        "requires_authentication": True,
+                        "login_url": login_url,
+                        "user_id": user_id,
+                        "action_required": "Please visit the login_url to re-authenticate and create a new session"
+                    }
+                )
+            except Exception as auth_error:
+                logger.error("Error generating login URL for session check", error=str(auth_error))
+                return SessionResponse(
+                    success=False,
+                    error="Session expired and authentication service unavailable. Please try again later."
+                )
+
+    except Exception as e:
+        logger.error("Error checking session with reauth", session_id=session_id[:8], error=str(e))
+        return SessionResponse(
             success=False,
             error=str(e)
         )
@@ -345,19 +654,39 @@ async def get_login_url(
         logger.error("Error generating login URL", error=str(e))
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.get("/auth/callback")
 @app.post("/auth/callback")
 async def auth_callback(
     code: str,
     state: str,
     user_id: str = "default",
-    auth_service: AuthService = Depends(get_auth_service)
+    create_session: bool = True,
+    auth_service: AuthService = Depends(get_auth_service),
+    session_auth: SessionAuthManager = Depends(get_session_auth_manager)
 ):
-    """Handle OAuth callback"""
+    """Handle OAuth callback and optionally create session"""
     try:
         success = await auth_service.handle_callback(code, state, user_id)
 
         if success:
-            return {"success": True, "message": "Authentication successful"}
+            response_data = {"success": True, "message": "Authentication successful"}
+
+            # Automatically create a session for the authenticated user
+            if create_session:
+                session_id = await session_auth.create_authenticated_session(user_id)
+                if session_id:
+                    session_info = await session_auth.get_session_info(session_id)
+                    response_data.update({
+                        "session_created": True,
+                        "session_id": session_id,
+                        "expires_at": session_info.get("expires_at") if session_info else None
+                    })
+                    logger.info("Auto-created session after authentication", user_id=user_id, session_id=session_id[:8])
+                else:
+                    response_data["session_created"] = False
+                    logger.warning("Failed to auto-create session after authentication", user_id=user_id)
+
+            return response_data
         else:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,

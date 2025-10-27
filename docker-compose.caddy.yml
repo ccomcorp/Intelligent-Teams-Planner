@@ -1,0 +1,39 @@
+version: '3.8'
+
+services:
+  # Caddy reverse proxy for HTTPS termination
+  caddy:
+    image: caddy:2.7-alpine
+    container_name: itp-caddy
+    ports:
+      - "80:80"       # HTTP (redirects to HTTPS)
+      - "443:443"     # HTTPS
+      - "8844:8844"   # HTTPS for OpenWebUI
+      - "8444:8444"   # HTTPS for MCP Server (OAuth callbacks)
+      - "8445:8445"   # HTTPS for MCPO Proxy
+      - "8446:8446"   # HTTPS for Teams Bot
+      - "8447:8447"   # HTTPS for RAG Service
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./certs:/etc/caddy/certs:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    networks:
+      - intelligent-teams-planner_itp-simple-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "--no-check-certificate", "http://localhost:80"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    # Note: Depends on existing services running
+
+volumes:
+  caddy_data:
+    driver: local
+  caddy_config:
+    driver: local
+
+networks:
+  intelligent-teams-planner_itp-simple-network:
+    external: true

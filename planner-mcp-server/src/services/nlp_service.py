@@ -11,6 +11,8 @@ import structlog
 
 from ..nlp.intent_classifier import IntentClassifier
 from ..nlp.entity_extractor import EntityExtractor, EntityExtractionResult
+from ..nlp.semantic_intent_matcher import SemanticIntentMatcher
+from ..nlp.hybrid_ner import HybridNER
 from ..nlp.date_parser import DateParser
 from ..nlp.context_manager import ConversationContextManager
 from ..nlp.batch_processor import BatchProcessor
@@ -55,21 +57,28 @@ class NLPService:
     Orchestrates intent classification, entity extraction, date parsing, and context management
     """
 
-    def __init__(self, database, cache_service=None):
+    def __init__(self, database, cache_service=None, use_semantic: bool = True):
         self.database = database
         self.cache_service = cache_service
+        self.use_semantic = use_semantic
 
-        # Initialize NLP components
+        # Initialize traditional NLP components
         self.intent_classifier = IntentClassifier()
         self.entity_extractor = EntityExtractor()
+
+        # Initialize modern semantic components
+        self.semantic_intent_matcher = SemanticIntentMatcher() if use_semantic else None
+        self.hybrid_ner = HybridNER() if use_semantic else None
+
+        # Other components
         self.date_parser = DateParser()
         self.context_manager = ConversationContextManager(database)
         self.batch_processor = BatchProcessor()
         self.disambiguator = NLDisambiguator(database, self.context_manager)
         self.error_handler = NLErrorHandler()
 
-        # Confidence thresholds
-        self.min_intent_confidence = 0.6
+        # Confidence thresholds (adjusted for semantic models)
+        self.min_intent_confidence = 0.4 if use_semantic else 0.6  # Lower threshold for semantic
         self.min_entity_confidence = 0.5
         self.min_date_confidence = 0.5
 
@@ -78,21 +87,40 @@ class NLPService:
     async def initialize(self):
         """Initialize all NLP components"""
         try:
-            logger.info("Initializing NLP service")
+            logger.info("Initializing NLP service", use_semantic=self.use_semantic)
 
-            # Initialize all components concurrently
-            await asyncio.gather(
+            # Build initialization tasks
+            init_tasks = [
                 self.intent_classifier.initialize(),
                 self.entity_extractor.initialize(),
                 self.context_manager.initialize()
-            )
+            ]
+
+            # Add semantic components if enabled
+            if self.use_semantic:
+                if self.semantic_intent_matcher:
+                    init_tasks.append(self.semantic_intent_matcher.initialize())
+                if self.hybrid_ner:
+                    init_tasks.append(self.hybrid_ner.initialize())
+
+            # Initialize all components concurrently
+            await asyncio.gather(*init_tasks)
 
             self.initialized = True
-            logger.info("NLP service initialized successfully")
+            logger.info("NLP service initialized successfully",
+                       components_count=len(init_tasks))
 
         except Exception as e:
             logger.error("Failed to initialize NLP service", error=str(e))
-            raise
+            # Fall back to traditional components only
+            if self.use_semantic:
+                logger.info("Falling back to traditional NLP components")
+                self.use_semantic = False
+                self.semantic_intent_matcher = None
+                self.hybrid_ner = None
+                await self.initialize()  # Retry without semantic components
+            else:
+                raise
 
     async def process_natural_language(self, user_input: str, user_id: str, session_id: str,
                                      context: Optional[Dict[str, Any]] = None) -> NLPProcessingResult:
@@ -119,16 +147,46 @@ class NLPService:
                         session_id=session_id,
                         input_length=len(user_input))
 
-            # Step 1: Intent Classification
-            intent_result = await self.intent_classifier.classify_intent(user_input)
-            intent = intent_result.intent if hasattr(intent_result, 'intent') else "unknown"
-            intent_confidence = intent_result.confidence if hasattr(intent_result, 'confidence') else 0.0
+            # Step 1: Intent Classification (try semantic first, fall back to traditional)
+            if self.use_semantic and self.semantic_intent_matcher:
+                try:
+                    semantic_result = await self.semantic_intent_matcher.classify_intent(user_input)
+                    intent = semantic_result.intent
+                    intent_confidence = semantic_result.confidence
+                    logger.debug("Using semantic intent classification",
+                               intent=intent, confidence=intent_confidence,
+                               matched_example=semantic_result.matched_example[:50])
+                except Exception as e:
+                    logger.warning("Semantic intent classification failed, using traditional", error=str(e))
+                    intent_result = await self.intent_classifier.classify_intent(user_input)
+                    intent = intent_result.intent if hasattr(intent_result, 'intent') else "unknown"
+                    intent_confidence = intent_result.confidence if hasattr(intent_result, 'confidence') else 0.0
+            else:
+                intent_result = await self.intent_classifier.classify_intent(user_input)
+                intent = intent_result.intent if hasattr(intent_result, 'intent') else "unknown"
+                intent_confidence = intent_result.confidence if hasattr(intent_result, 'confidence') else 0.0
 
-            # Step 2: Entity Extraction
-            entity_result = await self.entity_extractor.extract_entities(user_input, context)
-            entities = {}
-            for entity in entity_result.entities:
-                entities[entity.type] = entity.value
+            # Step 2: Entity Extraction (try hybrid first, fall back to traditional)
+            if self.use_semantic and self.hybrid_ner:
+                try:
+                    hybrid_result = await self.hybrid_ner.extract_entities(user_input, context)
+                    entities = {}
+                    for entity in hybrid_result.entities:
+                        entities[entity.type] = entity.value
+                    logger.debug("Using hybrid NER",
+                               entity_count=len(hybrid_result.entities),
+                               extraction_methods=hybrid_result.metadata.get("extraction_methods", []))
+                except Exception as e:
+                    logger.warning("Hybrid NER failed, using traditional", error=str(e))
+                    entity_result = await self.entity_extractor.extract_entities(user_input, context)
+                    entities = {}
+                    for entity in entity_result.entities:
+                        entities[entity.type] = entity.value
+            else:
+                entity_result = await self.entity_extractor.extract_entities(user_input, context)
+                entities = {}
+                for entity in entity_result.entities:
+                    entities[entity.type] = entity.value
 
             # Step 3: Date Parsing
             date_result = await self.date_parser.parse_date(user_input)
@@ -320,6 +378,7 @@ class NLPService:
                 "update_task": "update_task",
                 "delete_task": "delete_task",
                 "assign_task": "assign_task",
+                "create_and_assign_task": "create_task",  # Map to create_task tool
                 "complete_task": "complete_task",
                 "get_task_details": "get_task_details",
                 "help": "help"
@@ -347,6 +406,12 @@ class NLPService:
             if intent == "create_task":
                 if "TASK_TITLE" not in entities or not entities["TASK_TITLE"]:
                     return "I'd like to help you create a task. What should the task be called?"
+
+            elif intent == "create_and_assign_task":
+                if "TASK_TITLE" not in entities or not entities["TASK_TITLE"]:
+                    return "What should the new task be called?"
+                if "ASSIGNEE" not in entities:
+                    return "Who should I assign this task to?"
 
             elif intent == "assign_task":
                 if "ASSIGNEE" not in entities:
@@ -509,6 +574,15 @@ class NLPService:
                 else:
                     return f"Successfully deleted {count} tasks."
 
+            elif intent == "create_task":
+                task_title = entities.get("TASK_TITLE", "New Task")
+                return f"Task '{task_title}' created successfully."
+
+            elif intent == "create_and_assign_task":
+                assignee = entities.get("ASSIGNEE", "the specified person")
+                task_title = entities.get("TASK_TITLE", "New Task")
+                return f"Task '{task_title}' created and assigned to {assignee} successfully."
+
             elif intent == "assign_task":
                 assignee = entities.get("ASSIGNEE", "the specified person")
                 return f"Task assigned to {assignee} successfully."
@@ -608,3 +682,105 @@ class NLPService:
         except Exception as e:
             logger.error("Error getting service status", error=str(e))
             return {"initialized": False, "error": str(e)}
+
+    async def process_assignment_query(self, user_input: str, user_id: str, session_id: str) -> Dict[str, Any]:
+        """
+        Specialized processing for assignment queries using semantic analysis
+
+        Args:
+            user_input: User query about assignments
+            user_id: User identifier
+            session_id: Session identifier
+
+        Returns:
+            Dictionary with assignment information and suggested actions
+        """
+        try:
+            if not self.use_semantic or not self.hybrid_ner:
+                # Fall back to traditional processing
+                return await self._process_assignment_traditional(user_input, user_id, session_id)
+
+            logger.info("Processing assignment query with semantic analysis",
+                       query=user_input[:100])
+
+            # Use specialized assignment entity extraction
+            assignment_info = await self.hybrid_ner.extract_assignment_entities(user_input)
+
+            if assignment_info.get("confidence", 0) > 0.3:
+                # High confidence assignment extraction
+                result = {
+                    "intent": assignment_info.get("action_type", "assign_task"),
+                    "entities": {
+                        "ASSIGNEE": assignment_info.get("assignee"),
+                        "TASK_TITLE": assignment_info.get("task_title")
+                    },
+                    "confidence": assignment_info["confidence"],
+                    "processing_method": "semantic",
+                    "suggested_action": self._create_assignment_action(assignment_info)
+                }
+
+                # Filter out None values
+                result["entities"] = {k: v for k, v in result["entities"].items() if v is not None}
+
+                logger.info("Semantic assignment processing successful",
+                           intent=result["intent"],
+                           entities=list(result["entities"].keys()),
+                           confidence=result["confidence"])
+
+                return result
+            else:
+                logger.info("Low confidence semantic assignment, falling back")
+                return await self._process_assignment_traditional(user_input, user_id, session_id)
+
+        except Exception as e:
+            logger.error("Error in semantic assignment processing", error=str(e))
+            return await self._process_assignment_traditional(user_input, user_id, session_id)
+
+    async def _process_assignment_traditional(self, user_input: str, user_id: str, session_id: str) -> Dict[str, Any]:
+        """Fallback to traditional processing for assignment queries"""
+        try:
+            # Use regular NLP processing
+            result = await self.process_natural_language(user_input, user_id, session_id)
+
+            return {
+                "intent": result.intent,
+                "entities": result.entities,
+                "confidence": result.confidence_score,
+                "processing_method": "traditional",
+                "suggested_action": result.suggested_action
+            }
+
+        except Exception as e:
+            logger.error("Traditional assignment processing failed", error=str(e))
+            return {
+                "intent": "unknown",
+                "entities": {},
+                "confidence": 0.0,
+                "processing_method": "error",
+                "error": str(e)
+            }
+
+    def _create_assignment_action(self, assignment_info: Dict[str, Any]) -> Dict[str, Any]:
+        """Create suggested action from assignment information"""
+        action_type = assignment_info.get("action_type", "assign_task")
+
+        if action_type == "create_and_assign":
+            return {
+                "action": "create_task",
+                "tool": "create_task",
+                "parameters": {
+                    "title": assignment_info.get("task_title"),
+                    "assigned_to": assignment_info.get("assignee")
+                },
+                "confidence": assignment_info.get("confidence", 0.8)
+            }
+        else:
+            return {
+                "action": "assign_task",
+                "tool": "assign_task",
+                "parameters": {
+                    "task_title": assignment_info.get("task_title"),
+                    "assignee": assignment_info.get("assignee")
+                },
+                "confidence": assignment_info.get("confidence", 0.8)
+            }

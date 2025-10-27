@@ -25,7 +25,7 @@ class DynamicRouteGenerator:
     def __init__(self, mcp_client: MCPClient, openapi_generator: OpenAPIGenerator):
         self.mcp_client = mcp_client
         self.openapi_generator = openapi_generator
-        self.router = APIRouter(prefix="/v1/tools", tags=["MCP Tools"])
+        self.router = APIRouter(prefix="/tools", tags=["MCP Tools"])
         self.tool_models: Dict[str, Any] = {}
 
     async def initialize(self):
@@ -71,7 +71,9 @@ class DynamicRouteGenerator:
                 return
 
             tool_description = tool.get("description", f"Execute {tool_name} tool")
-            input_schema = tool.get("inputSchema", {})
+
+            # Extract the input schema from parameters field (MCP tools structure)
+            input_schema = tool.get("inputSchema", tool.get("parameters", {}))
 
             # Create Pydantic model for request validation
             request_model = self._create_request_model(tool_name, input_schema)
@@ -87,6 +89,38 @@ class DynamicRouteGenerator:
                 try:
                     # Convert Pydantic model to dictionary
                     arguments = request.model_dump()
+
+                    # Special handling for search_tasks when query is missing
+                    if tool_name == "search_tasks" and not arguments.get("query"):
+                        logger.info("DEBUG: search_tasks called with missing query, handling gracefully")
+                        # Try to extract query from other common fields or provide helpful error
+                        if hasattr(request, 'q'):
+                            arguments["query"] = getattr(request, 'q')
+                        elif hasattr(request, 'search'):
+                            arguments["query"] = getattr(request, 'search')
+                        elif hasattr(request, 'term'):
+                            arguments["query"] = getattr(request, 'term')
+                        else:
+                            # Provide a more helpful error response
+                            return {
+                                "success": False,
+                                "data": {
+                                    "message": "Search query is required. Please provide a search term.",
+                                    "missing_fields": ["query"],
+                                    "example": {
+                                        "query": "designated",
+                                        "description": "To search for tasks containing 'designated', use: {'query': 'designated'}"
+                                    },
+                                    "help": "This endpoint requires a 'query' parameter with the search term you want to find in task titles and descriptions."
+                                },
+                                "message": "Missing required search query parameter",
+                                "tool_name": tool_name,
+                                "metadata": {
+                                    "operation": "parameter_validation",
+                                    "required_fields": ["query"],
+                                    "provided_fields": list(arguments.keys())
+                                }
+                            }
 
                     # Execute tool via MCP client
                     result = await mcp_client.execute_tool(tool_name, arguments, user_id)
@@ -111,7 +145,7 @@ class DynamicRouteGenerator:
                         detail=f"Tool execution failed: {str(e)}"
                     )
 
-            # Add route to router
+            # Add route to router (main tool endpoint)
             self.router.add_api_route(
                 path=f"/{tool_name}",
                 endpoint=tool_handler,
@@ -122,7 +156,18 @@ class DynamicRouteGenerator:
                 operation_id=f"execute_{tool_name}"
             )
 
-            logger.debug("Created dynamic route", tool=tool_name, path=f"/v1/tools/{tool_name}")
+            # Add additional route with execute_ prefix for OpenWebUI compatibility
+            self.router.add_api_route(
+                path=f"/execute_{tool_name}",
+                endpoint=tool_handler,
+                methods=["POST"],
+                summary=tool_description,
+                description=f"Execute the {tool_name} MCP tool (OpenWebUI compatibility)",
+                response_model=dict,
+                operation_id=f"execute_{tool_name}_alt"
+            )
+
+            logger.debug("Created dynamic route", tool=tool_name, path=f"/tools/{tool_name}")
 
         except Exception as e:
             logger.error("Failed to create tool route", tool=tool.get("name"), error=str(e))
@@ -255,7 +300,7 @@ class DynamicRouteGenerator:
             for tool_name, model in self.tool_models.items():
                 tools.append({
                     "name": tool_name,
-                    "endpoint": f"/v1/tools/{tool_name}",
+                    "endpoint": f"/tools/{tool_name}",
                     "method": "POST",
                     "schema": model.model_json_schema(),
                     "description": model.model_json_schema().get("description", f"Execute {tool_name} tool")

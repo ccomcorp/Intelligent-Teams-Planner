@@ -20,6 +20,12 @@ class GraphAPIError(Exception):
     """Graph API operation error"""
     pass
 
+class AuthenticationRequired(GraphAPIError):
+    """Authentication required - no valid token available"""
+    def __init__(self, message: str, login_url: str = None):
+        super().__init__(message)
+        self.login_url = login_url
+
 class RateLimitExceeded(GraphAPIError):
     """Rate limit exceeded"""
     pass
@@ -60,7 +66,9 @@ class GraphAPIClient:
             # Get access token
             access_token = await self.auth_service.get_access_token(user_id)
             if not access_token:
-                raise GraphAPIError("No valid access token available")
+                # Generate login URL for authentication
+                login_url = await self.auth_service.get_login_url(user_id)
+                raise AuthenticationRequired("No valid access token available", login_url)
 
             # Check cache for GET requests
             if method == "GET" and use_cache:
@@ -307,6 +315,33 @@ class GraphAPIClient:
             data=bucket_data,
             use_cache=False
         )
+
+    async def update_bucket(self, bucket_id: str, bucket_data: Dict[str, Any], user_id: str) -> Optional[Dict[str, Any]]:
+        """Update a bucket"""
+        return await self._make_request(
+            "PATCH",
+            f"/planner/buckets/{bucket_id}",
+            user_id,
+            data=bucket_data,
+            use_cache=False
+        )
+
+    async def delete_bucket(self, bucket_id: str, user_id: str) -> bool:
+        """Delete a bucket"""
+        try:
+            await self._make_request(
+                "DELETE",
+                f"/planner/buckets/{bucket_id}",
+                user_id,
+                use_cache=False
+            )
+            return True
+        except GraphAPIError:
+            return False
+
+    async def get_bucket(self, bucket_id: str, user_id: str) -> Optional[Dict[str, Any]]:
+        """Get a specific bucket"""
+        return await self._make_request("GET", f"/planner/buckets/{bucket_id}", user_id)
 
     # Batch operations for efficiency
     async def batch_request(self, requests: List[Dict[str, Any]], user_id: str) -> List[Dict[str, Any]]:

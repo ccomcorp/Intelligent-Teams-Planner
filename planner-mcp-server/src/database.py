@@ -10,7 +10,7 @@ import asyncio
 import asyncpg
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
-from sqlalchemy import String, DateTime, Text, JSON, Boolean, Integer, func, text
+from sqlalchemy import String, DateTime, Text, JSON, Boolean, Integer, func, text, select
 from sqlalchemy.dialects.postgresql import UUID
 import structlog
 import uuid
@@ -245,7 +245,7 @@ class Database:
             async with self.session_factory() as session:
                 # Try to get existing user
                 result = await session.execute(
-                    func.select(User).where(User.user_id == user_id)
+                    select(User).where(User.user_id == user_id)
                 )
                 user = result.scalar_one_or_none()
 
@@ -284,7 +284,7 @@ class Database:
             async with self.session_factory() as session:
                 # Check if plan exists
                 result = await session.execute(
-                    func.select(Plan).where(Plan.graph_id == plan_data["graph_id"])
+                    select(Plan).where(Plan.graph_id == plan_data["graph_id"])
                 )
                 plan = result.scalar_one_or_none()
 
@@ -312,7 +312,7 @@ class Database:
         try:
             async with self.session_factory() as session:
                 result = await session.execute(
-                    func.select(Plan).where(
+                    select(Plan).where(
                         Plan.owner_id == owner_id,
                         Plan.is_archived == False
                     ).order_by(Plan.updated_at.desc())
@@ -330,7 +330,7 @@ class Database:
             async with self.session_factory() as session:
                 # Check if task exists
                 result = await session.execute(
-                    func.select(Task).where(Task.graph_id == task_data["graph_id"])
+                    select(Task).where(Task.graph_id == task_data["graph_id"])
                 )
                 task = result.scalar_one_or_none()
 
@@ -358,7 +358,7 @@ class Database:
         try:
             async with self.session_factory() as session:
                 result = await session.execute(
-                    func.select(Task).where(Task.plan_graph_id == plan_graph_id)
+                    select(Task).where(Task.plan_graph_id == plan_graph_id)
                     .order_by(Task.created_at.desc())
                 )
                 return result.scalars().all()
@@ -374,7 +374,7 @@ class Database:
             async with self.session_factory() as session:
                 # Check if tokens exist
                 result = await session.execute(
-                    func.select(TokenStorage).where(TokenStorage.user_id == user_id)
+                    select(TokenStorage).where(TokenStorage.user_id == user_id)
                 )
                 token_storage = result.scalar_one_or_none()
 
@@ -403,7 +403,7 @@ class Database:
         try:
             async with self.session_factory() as session:
                 result = await session.execute(
-                    func.select(TokenStorage).where(
+                    select(TokenStorage).where(
                         TokenStorage.user_id == user_id,
                         TokenStorage.expires_at > func.now()
                     )
@@ -419,7 +419,7 @@ class Database:
         try:
             async with self.session_factory() as session:
                 result = await session.execute(
-                    func.select(TokenStorage).where(TokenStorage.user_id == user_id)
+                    select(TokenStorage).where(TokenStorage.user_id == user_id)
                 )
                 token_storage = result.scalar_one_or_none()
 
@@ -438,7 +438,7 @@ class Database:
             async with self.session_factory() as session:
                 # Check if context exists
                 result = await session.execute(
-                    func.select(ConversationContext).where(
+                    select(ConversationContext).where(
                         ConversationContext.conversation_id == conversation_id
                     )
                 )
@@ -468,7 +468,7 @@ class Database:
         try:
             async with self.session_factory() as session:
                 result = await session.execute(
-                    func.select(ConversationContext).where(
+                    select(ConversationContext).where(
                         ConversationContext.conversation_id == conversation_id
                     )
                 )
@@ -484,7 +484,7 @@ class Database:
         try:
             async with self.session_factory() as session:
                 result = await session.execute(
-                    func.select(Plan).where(Plan.graph_id == graph_id)
+                    select(Plan).where(Plan.graph_id == graph_id)
                 )
                 plan = result.scalar_one_or_none()
 
@@ -503,7 +503,7 @@ class Database:
         try:
             async with self.session_factory() as session:
                 result = await session.execute(
-                    func.select(Task).where(Task.graph_id == graph_id)
+                    select(Task).where(Task.graph_id == graph_id)
                 )
                 task = result.scalar_one_or_none()
 
@@ -522,7 +522,7 @@ class Database:
         try:
             async with self.session_factory() as session:
                 result = await session.execute(
-                    func.select(Plan).where(Plan.graph_id == graph_id)
+                    select(Plan).where(Plan.graph_id == graph_id)
                 )
                 return result.scalar_one_or_none()
 
@@ -535,7 +535,7 @@ class Database:
         try:
             async with self.session_factory() as session:
                 result = await session.execute(
-                    func.select(Task).where(Task.graph_id == graph_id)
+                    select(Task).where(Task.graph_id == graph_id)
                 )
                 return result.scalar_one_or_none()
 

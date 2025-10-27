@@ -47,25 +47,12 @@ class AuthService:
         self.cache_service = cache_service
 
         # Default redirect URI for development
-        self.redirect_uri = redirect_uri or "http://localhost:8888/auth/callback"
+        self.redirect_uri = redirect_uri or "http://localhost:7100/auth/callback"
 
-        # Microsoft Graph API scopes for Teams and Planner (Full functionality)
-        # Using the correct MSAL scope format for Microsoft Graph
+        # Microsoft Graph API scopes for Teams and Planner
+        # Using simplified scope format for OAuth2 authentication
         self.scopes = [
-            # Core Microsoft Graph permissions
-            "User.Read",
-            "Group.Read.All",
-            "Group.ReadWrite.All",
-            # Planner permissions
-            "Tasks.Read",
-            "Tasks.ReadWrite",
-            # Teams permissions
-            "Team.ReadBasic.All",
-            "TeamMember.Read.All",
-            "Channel.ReadBasic.All",
-            # Additional useful permissions
-            "Mail.Read",
-            "Calendars.Read"
+            "https://graph.microsoft.com/.default"
         ]
 
         # Encryption for token storage
@@ -139,9 +126,11 @@ class AuthService:
                 user_id = cached_state.get("user_id", "default")
 
             # Exchange code for tokens
+            # Use a subset of scopes for token exchange as per Microsoft documentation
+            token_scopes = ["https://graph.microsoft.com/User.Read"]
             result = self.app.acquire_token_by_authorization_code(
                 code,
-                scopes=self.scopes,
+                scopes=token_scopes,
                 redirect_uri=self.redirect_uri
             )
 

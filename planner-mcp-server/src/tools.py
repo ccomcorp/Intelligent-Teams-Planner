@@ -9,9 +9,10 @@ from abc import ABC, abstractmethod
 
 import structlog
 
-from .graph_client import GraphAPIClient, GraphAPIError
+from .graph_client import GraphAPIClient, GraphAPIError, AuthenticationRequired
 from .database import Database
 from .cache import CacheService
+from .required_fields import RequiredFieldsHandler
 from .nlp import (
     IntentClassifier,
     EntityExtractor,
@@ -19,6 +20,8 @@ from .nlp import (
     ConversationContextManager,
     BatchProcessor
 )
+from .nlp.hybrid_ner import HybridNER
+from .nlp.semantic_intent_matcher import SemanticIntentMatcher
 
 logger = structlog.get_logger(__name__)
 
@@ -283,6 +286,17 @@ class ListTasks(Tool):
                 }
             )
 
+        except AuthenticationRequired as e:
+            logger.info("Authentication required for list_tasks", user_id=context.get("user_id", "default"))
+            return ToolResult(
+                success=False,
+                error="Authentication required to access tasks. Please click the link below to authenticate with Microsoft.",
+                metadata={
+                    "requires_auth": True,
+                    "login_url": e.login_url,
+                    "auth_message": "To access Microsoft Planner tasks, you need to authenticate with your Microsoft account."
+                }
+            )
         except GraphAPIError as e:
             logger.error("Graph API error in list_tasks", error=str(e))
             return ToolResult(success=False, error=f"Graph API error: {str(e)}")
@@ -358,6 +372,10 @@ class CreateTask(Tool):
                     "type": "array",
                     "items": {"type": "string"},
                     "description": "User IDs to assign task to"
+                },
+                "due_date": {
+                    "type": "string",
+                    "description": "Due date in ISO 8601 format (optional)"
                 }
             },
             "required": ["plan_id", "title"]
@@ -371,6 +389,7 @@ class CreateTask(Tool):
             description = arguments.get("description", "")
             bucket_id = arguments.get("bucket_id")
             assigned_to = arguments.get("assigned_to", [])
+            due_date = arguments.get("due_date")
 
             # Prepare task data (only fields supported during creation)
             task_data = {
@@ -381,14 +400,23 @@ class CreateTask(Tool):
             if bucket_id:
                 task_data["bucketId"] = bucket_id
 
-            # Prepare assignments
+            # Prepare assignments - resolve emails to user IDs
             if assigned_to:
                 assignments = {}
-                for user_id_assignment in assigned_to:
-                    assignments[user_id_assignment] = {
-                        "@odata.type": "#microsoft.graph.plannerAssignment",
-                        "orderHint": " !"
-                    }
+                for user_identifier in assigned_to:
+                    # Resolve email to user ID if needed
+                    user_id_resolved = await self._resolve_user_identifier(user_identifier, user_id)
+                    if user_id_resolved:
+                        assignments[user_id_resolved] = {
+                            "@odata.type": "#microsoft.graph.plannerAssignment",
+                            "orderHint": " !"
+                        }
+                        logger.info("Resolved user for assignment",
+                                   original=user_identifier,
+                                   resolved=user_id_resolved)
+                    else:
+                        logger.warning("Could not resolve user identifier", identifier=user_identifier)
+
                 task_data["assignments"] = assignments
 
             # Create task via Graph API
@@ -439,6 +467,137 @@ class CreateTask(Tool):
         except Exception as e:
             logger.error("Error creating task", error=str(e))
             return ToolResult(success=False, error=f"Failed to create task: {str(e)}")
+
+    async def _resolve_user_identifier(self, identifier: str, requesting_user_id: str) -> Optional[str]:
+        """
+        Intelligently resolve a user identifier to a Microsoft Graph user ID
+
+        Supports:
+        - Full email addresses: "angel@ccomgroupinc.com"
+        - Name extraction from email: "angel" from "angel@ccomgroupinc.com"
+        - Display names: "Angel Smith"
+        - Existing user IDs: "fbab97d0-4932-4511-b675-204639209557"
+
+        Args:
+            identifier: Email address, name, or user ID
+            requesting_user_id: ID of user making the request (for authentication)
+
+        Returns:
+            Microsoft Graph user ID if found, None otherwise
+        """
+        import re
+        import httpx
+
+        try:
+            # If it looks like a user ID already (UUID format), return as-is
+            if re.match(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', identifier, re.IGNORECASE):
+                return identifier
+
+            access_token = await self.graph_client.get_access_token(requesting_user_id)
+            if not access_token:
+                logger.error("No access token available for user resolution")
+                return None
+
+            headers = {
+                "Authorization": f"Bearer {access_token}",
+                "Content-Type": "application/json"
+            }
+
+            async with httpx.AsyncClient() as client:
+                # Strategy 1: If it's a full email address, try direct lookup
+                if '@' in identifier and '.' in identifier:
+                    try:
+                        response = await client.get(
+                            f"https://graph.microsoft.com/v1.0/users/{identifier}",
+                            headers=headers
+                        )
+                        if response.status_code == 200:
+                            user_data = response.json()
+                            user_id = user_data.get("id")
+                            logger.info("Successfully resolved email to user ID",
+                                       email=identifier, user_id=user_id)
+                            return user_id
+                    except Exception:
+                        pass  # Try other strategies
+
+                # Strategy 2: Extract name from email and search by it
+                search_terms = [identifier.lower()]
+                if '@' in identifier:
+                    # Extract username from email
+                    username = identifier.split('@')[0]
+                    search_terms.append(username.lower())
+                    # Also try with domain context
+                    if 'ccomgroupinc.com' in identifier:
+                        search_terms.append(f"{username}@ccomgroupinc.com")
+
+                # Strategy 3: Search using Microsoft Graph search API
+                for search_term in search_terms:
+                    try:
+                        # Use the users endpoint with $filter
+                        search_queries = [
+                            f"startswith(mail,'{search_term}')",
+                            f"startswith(userPrincipalName,'{search_term}')",
+                            f"startswith(displayName,'{search_term.title()}')",
+                            f"startswith(givenName,'{search_term.title()}')",
+                        ]
+
+                        for query in search_queries:
+                            response = await client.get(
+                                f"https://graph.microsoft.com/v1.0/users?$filter={query}&$top=5",
+                                headers=headers
+                            )
+
+                            if response.status_code == 200:
+                                result = response.json()
+                                users = result.get("value", [])
+
+                                if users:
+                                    # Prefer exact matches
+                                    for user in users:
+                                        email = user.get("mail", "").lower()
+                                        upn = user.get("userPrincipalName", "").lower()
+                                        display_name = user.get("displayName", "").lower()
+                                        given_name = user.get("givenName", "").lower()
+
+                                        # Exact email match
+                                        if identifier.lower() in [email, upn]:
+                                            logger.info("Found exact email match",
+                                                       original=identifier,
+                                                       matched=email,
+                                                       user_id=user["id"])
+                                            return user["id"]
+
+                                        # Name match (username from email or display name)
+                                        if search_term in [email.split('@')[0], given_name, display_name]:
+                                            logger.info("Found name match",
+                                                       original=identifier,
+                                                       search_term=search_term,
+                                                       matched_user=display_name,
+                                                       user_id=user["id"])
+                                            return user["id"]
+
+                                    # If no exact match, return first result as best guess
+                                    best_match = users[0]
+                                    logger.info("Using best match for user resolution",
+                                               original=identifier,
+                                               matched_user=best_match.get("displayName"),
+                                               matched_email=best_match.get("mail"),
+                                               user_id=best_match["id"])
+                                    return best_match["id"]
+
+                    except Exception as e:
+                        logger.debug("Search query failed", query=query, error=str(e))
+                        continue
+
+                logger.warning("Could not resolve user identifier after trying all strategies",
+                              identifier=identifier)
+                return None
+
+        except Exception as e:
+            logger.error("Error resolving user identifier",
+                        identifier=identifier,
+                        error=str(e))
+            return None
 
 class UpdateTask(Tool):
     """Update an existing task in Microsoft Planner"""
@@ -896,6 +1055,17 @@ class SearchTasks(Tool):
                 }
             )
 
+        except AuthenticationRequired as e:
+            logger.info("Authentication required for search_tasks", user_id=context.get("user_id", "default"))
+            return ToolResult(
+                success=False,
+                error="Authentication required to search tasks. Please click the link below to authenticate with Microsoft.",
+                metadata={
+                    "requires_auth": True,
+                    "login_url": e.login_url,
+                    "auth_message": "To search Microsoft Planner tasks, you need to authenticate with your Microsoft account."
+                }
+            )
         except GraphAPIError as e:
             logger.error("Graph API error in search_tasks", error=str(e))
             return ToolResult(success=False, error=f"Graph API error: {str(e)}")
@@ -1031,6 +1201,17 @@ class GetMyTasks(Tool):
                 }
             )
 
+        except AuthenticationRequired as e:
+            logger.info("Authentication required for get_my_tasks", user_id=user_id)
+            return ToolResult(
+                success=False,
+                error="Authentication required to access your tasks. Please click the link below to authenticate with Microsoft.",
+                metadata={
+                    "requires_auth": True,
+                    "login_url": e.login_url,
+                    "auth_message": "To access your Microsoft Planner tasks, you need to authenticate with your Microsoft account."
+                }
+            )
         except GraphAPIError as e:
             logger.error("Graph API error in get_my_tasks", error=str(e))
             return ToolResult(success=False, error=f"Graph API error: {str(e)}")
@@ -1406,6 +1587,231 @@ class ListBuckets(Tool):
             logger.error("Error listing buckets", error=str(e))
             return ToolResult(success=False, error=f"Failed to list buckets: {str(e)}")
 
+class CreateBucket(Tool):
+    """Create a new bucket (category) in a plan"""
+
+    def __init__(self, graph_client: GraphAPIClient, database: Database):
+        super().__init__(
+            "create_bucket",
+            "Create a new bucket (category) in a Microsoft Planner plan"
+        )
+        self.graph_client = graph_client
+        self.database = database
+
+    def _define_parameters(self) -> Dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "plan_id": {
+                    "type": "string",
+                    "description": "Plan ID to create bucket in (required)"
+                },
+                "name": {
+                    "type": "string",
+                    "description": "Name of the bucket (required)"
+                },
+                "order_hint": {
+                    "type": "string",
+                    "description": "Order hint for bucket positioning (optional)"
+                }
+            },
+            "required": ["plan_id", "name"]
+        }
+
+    async def execute(self, arguments: Dict[str, Any], context: Dict[str, Any]) -> ToolResult:
+        try:
+            user_id = context.get("user_id", "default")
+            plan_id = arguments["plan_id"]
+            name = arguments["name"]
+            order_hint = arguments.get("order_hint")
+
+            # Prepare bucket data
+            bucket_data = {
+                "name": name,
+                "planId": plan_id
+            }
+
+            if order_hint:
+                bucket_data["orderHint"] = order_hint
+
+            # Create bucket using Graph API
+            bucket = await self.graph_client.create_bucket(bucket_data, user_id)
+
+            if not bucket:
+                return ToolResult(success=False, error="Failed to create bucket")
+
+            # Get plan info for context
+            plan_info = await self.graph_client.get_plan_details(plan_id, user_id)
+
+            return ToolResult(
+                success=True,
+                content={
+                    "bucket": bucket,
+                    "bucket_id": bucket.get("id"),
+                    "bucket_name": bucket.get("name"),
+                    "plan_title": plan_info.get("title", "Unknown Plan"),
+                    "plan_id": plan_id
+                },
+                metadata={
+                    "operation": "create_bucket",
+                    "plan_id": plan_id,
+                    "bucket_id": bucket.get("id"),
+                    "timestamp": datetime.utcnow().isoformat()
+                }
+            )
+
+        except GraphAPIError as e:
+            logger.error("Graph API error in create_bucket", error=str(e))
+            return ToolResult(success=False, error=f"Graph API error: {str(e)}")
+        except Exception as e:
+            logger.error("Error creating bucket", error=str(e))
+            return ToolResult(success=False, error=f"Failed to create bucket: {str(e)}")
+
+class UpdateBucket(Tool):
+    """Update an existing bucket (category) in a plan"""
+
+    def __init__(self, graph_client: GraphAPIClient, database: Database):
+        super().__init__(
+            "update_bucket",
+            "Update an existing bucket (category) in a Microsoft Planner plan"
+        )
+        self.graph_client = graph_client
+        self.database = database
+
+    def _define_parameters(self) -> Dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "bucket_id": {
+                    "type": "string",
+                    "description": "ID of the bucket to update (required)"
+                },
+                "name": {
+                    "type": "string",
+                    "description": "New name for the bucket (optional)"
+                },
+                "order_hint": {
+                    "type": "string",
+                    "description": "New order hint for bucket positioning (optional)"
+                }
+            },
+            "required": ["bucket_id"]
+        }
+
+    async def execute(self, arguments: Dict[str, Any], context: Dict[str, Any]) -> ToolResult:
+        try:
+            user_id = context.get("user_id", "default")
+            bucket_id = arguments["bucket_id"]
+
+            # Prepare update data - only include fields that are provided
+            update_data = {}
+            if "name" in arguments:
+                update_data["name"] = arguments["name"]
+            if "order_hint" in arguments:
+                update_data["orderHint"] = arguments["order_hint"]
+
+            if not update_data:
+                return ToolResult(success=False, error="No update fields provided")
+
+            # Update bucket using Graph API
+            updated_bucket = await self.graph_client.update_bucket(bucket_id, update_data, user_id)
+
+            if not updated_bucket:
+                return ToolResult(success=False, error="Failed to update bucket")
+
+            return ToolResult(
+                success=True,
+                content={
+                    "bucket": updated_bucket,
+                    "bucket_id": updated_bucket.get("id"),
+                    "bucket_name": updated_bucket.get("name"),
+                    "updated_fields": list(update_data.keys())
+                },
+                metadata={
+                    "operation": "update_bucket",
+                    "bucket_id": bucket_id,
+                    "updated_fields": list(update_data.keys()),
+                    "timestamp": datetime.utcnow().isoformat()
+                }
+            )
+
+        except GraphAPIError as e:
+            logger.error("Graph API error in update_bucket", error=str(e))
+            return ToolResult(success=False, error=f"Graph API error: {str(e)}")
+        except Exception as e:
+            logger.error("Error updating bucket", error=str(e))
+            return ToolResult(success=False, error=f"Failed to update bucket: {str(e)}")
+
+class DeleteBucket(Tool):
+    """Delete a bucket (category) from a plan"""
+
+    def __init__(self, graph_client: GraphAPIClient, database: Database):
+        super().__init__(
+            "delete_bucket",
+            "Delete a bucket (category) from a Microsoft Planner plan"
+        )
+        self.graph_client = graph_client
+        self.database = database
+
+    def _define_parameters(self) -> Dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "bucket_id": {
+                    "type": "string",
+                    "description": "ID of the bucket to delete (required)"
+                },
+                "confirm": {
+                    "type": "boolean",
+                    "description": "Confirmation flag to prevent accidental deletion (required)",
+                    "default": False
+                }
+            },
+            "required": ["bucket_id", "confirm"]
+        }
+
+    async def execute(self, arguments: Dict[str, Any], context: Dict[str, Any]) -> ToolResult:
+        try:
+            user_id = context.get("user_id", "default")
+            bucket_id = arguments["bucket_id"]
+            confirm = arguments.get("confirm", False)
+
+            if not confirm:
+                return ToolResult(
+                    success=False,
+                    error="Deletion not confirmed. Set 'confirm' to true to proceed."
+                )
+
+            # Get bucket info before deletion for logging
+            bucket_info = await self.graph_client.get_bucket(bucket_id, user_id)
+
+            # Delete bucket using Graph API
+            success = await self.graph_client.delete_bucket(bucket_id, user_id)
+
+            if not success:
+                return ToolResult(success=False, error="Failed to delete bucket")
+
+            return ToolResult(
+                success=True,
+                content={
+                    "message": "Bucket deleted successfully",
+                    "deleted_bucket_id": bucket_id,
+                    "deleted_bucket_name": bucket_info.get("name") if bucket_info else "Unknown"
+                },
+                metadata={
+                    "operation": "delete_bucket",
+                    "bucket_id": bucket_id,
+                    "timestamp": datetime.utcnow().isoformat()
+                }
+            )
+
+        except GraphAPIError as e:
+            logger.error("Graph API error in delete_bucket", error=str(e))
+            return ToolResult(success=False, error=f"Graph API error: {str(e)}")
+        except Exception as e:
+            logger.error("Error deleting bucket", error=str(e))
+            return ToolResult(success=False, error=f"Failed to delete bucket: {str(e)}")
+
 # Search and Query Tools
 
 class SearchPlans(Tool):
@@ -1528,24 +1934,52 @@ class ProcessNaturalLanguage(Tool):
             user_id = context.get("user_id", "default")
 
             # Extract conversation context
-            conversation_context = await self.nlp_components["context_manager"].get_conversation_context(
+            conversation_context = await self.nlp_components["context_manager"].get_context(
                 user_id, session_id
             )
 
             # Classify intent
-            intent_result = await self.nlp_components["intent_classifier"].classify_intent(
-                user_input, conversation_context
-            )
+            # Use semantic intent classification
+            semantic_match = await self.nlp_components["semantic_intent_matcher"].classify_intent(user_input)
+
+            # Create intent result object for backward compatibility
+            class IntentResult:
+                def __init__(self, intent, confidence):
+                    self.intent = intent
+                    self.confidence = confidence
+
+            intent_result = IntentResult(semantic_match.intent, semantic_match.confidence)
 
             # Extract entities
-            entities = await self.nlp_components["entity_extractor"].extract_entities(
-                user_input, conversation_context
-            )
+            # Use hybrid NER for entity extraction
+            ner_result = await self.nlp_components["hybrid_ner"].extract_entities(user_input)
+
+            # Convert hybrid NER results to legacy format
+            class EntityResult:
+                def __init__(self, entities):
+                    self.entities = entities
+
+            class Entity:
+                def __init__(self, type, value):
+                    self.type = type
+                    self.value = value
+
+            # Convert entities from hybrid NER format
+            legacy_entities = []
+            for entity in ner_result.entities:
+                legacy_entities.append(Entity(entity.type, entity.value))
+
+            entity_result = EntityResult(legacy_entities)
+
+            # Convert entities to dictionary format
+            entities = {}
+            for entity in entity_result.entities:
+                entities[entity.type] = entity.value
 
             # Parse dates if present
-            parsed_dates = await self.nlp_components["date_parser"].parse_dates(user_input)
-            if parsed_dates:
-                entities.update(parsed_dates)
+            date_result = await self.nlp_components["date_parser"].parse_date(user_input)
+            if date_result and hasattr(date_result, 'parsed_date') and date_result.parsed_date:
+                entities["DUE_DATE"] = date_result.parsed_date.isoformat()
 
             # Check for batch operations
             batch_operation = await self.nlp_components["batch_processor"].detect_batch_operation(
@@ -1553,27 +1987,34 @@ class ProcessNaturalLanguage(Tool):
             )
 
             # Update conversation context
-            await self.nlp_components["context_manager"].update_context(
-                user_id, session_id, {
-                    "last_input": user_input,
-                    "last_intent": intent_result,
-                    "last_entities": entities,
-                    "timestamp": datetime.utcnow().isoformat()
+            await self.nlp_components["context_manager"].add_message(
+                user_id=user_id,
+                session_id=session_id,
+                role="user",
+                content=user_input,
+                entities=entities,
+                intent=intent_result.intent if hasattr(intent_result, 'intent') else "unknown",
+                metadata={
+                    "timestamp": datetime.utcnow().isoformat(),
+                    "confidence": intent_result.confidence if hasattr(intent_result, 'confidence') else 0.0
                 }
             )
 
             result = {
-                "intent": intent_result,
+                "intent": {
+                    "intent": intent_result.intent if hasattr(intent_result, 'intent') else "unknown",
+                    "confidence": intent_result.confidence if hasattr(intent_result, 'confidence') else 0.0
+                },
                 "entities": entities,
                 "batch_operation": batch_operation,
                 "conversation_context": conversation_context,
                 "suggested_actions": self._generate_action_suggestions(intent_result, entities, batch_operation),
-                "confidence": intent_result.get("confidence", 0.0)
+                "confidence": intent_result.confidence if hasattr(intent_result, 'confidence') else 0.0
             }
 
             logger.info("Natural language processing completed",
                         user_id=user_id,
-                        intent=intent_result.get("intent"),
+                        intent=intent_result.intent if hasattr(intent_result, 'intent') else "unknown",
                         entities_count=len(entities),
                         is_batch=batch_operation is not None)
 
@@ -1594,69 +2035,354 @@ class ProcessNaturalLanguage(Tool):
 
     def _generate_action_suggestions(self, intent_result: Dict[str, Any], entities: Dict[str, Any],
                                    batch_operation: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Generate suggested actions based on NLP analysis"""
+        """Generate direct routing suggestions for ALL Microsoft Planner operations"""
         suggestions = []
 
-        intent = intent_result.get("intent", "unknown")
+        intent = intent_result.intent if hasattr(intent_result, 'intent') else "unknown"
+        confidence = intent_result.confidence if hasattr(intent_result, 'confidence') else 0.0
 
         try:
+            # PLAN MANAGEMENT OPERATIONS
             if intent == "create_plan":
                 suggestions.append({
                     "tool": "create_plan",
                     "parameters": {
-                        "title": entities.get("PLAN_NAME", "New Plan"),
+                        "title": entities.get("PLAN_NAME", entities.get("TASK_TITLE", "New Plan")),
                         "description": entities.get("DESCRIPTION", ""),
-                        "owner": entities.get("PERSON", "")
+                        "owner": entities.get("ASSIGNEE", entities.get("USER_MENTION", ""))
                     },
-                    "confidence": intent_result.get("confidence", 0.0)
+                    "confidence": confidence,
+                    "direct_executable": True
                 })
 
+            elif intent == "list_plans" or intent == "read_plans":
+                suggestions.append({
+                    "tool": "list_plans",
+                    "parameters": {},
+                    "confidence": confidence,
+                    "direct_executable": True
+                })
+
+            elif intent == "search_plans":
+                suggestions.append({
+                    "tool": "search_plans",
+                    "parameters": {
+                        "query": entities.get("PLAN_NAME", entities.get("SEARCH_TERM", "")),
+                        "limit": entities.get("QUANTITY", 10)
+                    },
+                    "confidence": confidence,
+                    "direct_executable": True
+                })
+
+            # TASK MANAGEMENT OPERATIONS
             elif intent == "create_task":
                 task_params = {
-                    "title": entities.get("TASK_NAME", "New Task"),
+                    "title": entities.get("TASK_TITLE", entities.get("TASK_NAME", "New Task")),
                     "description": entities.get("DESCRIPTION", ""),
-                    "plan_id": entities.get("PLAN_ID", "")
+                    "plan_id": entities.get("PLAN_NAME", entities.get("PLAN_ID", ""))
                 }
 
-                # Add date information if available
+                # Add optional parameters
                 if "DUE_DATE" in entities:
                     task_params["due_date"] = entities["DUE_DATE"]
-
+                if "START_DATE" in entities:
+                    task_params["start_date"] = entities["START_DATE"]
                 if "PRIORITY" in entities:
                     task_params["priority"] = entities["PRIORITY"]
-
-                if "PERSON" in entities:
-                    task_params["assignee"] = entities["PERSON"]
+                if "ASSIGNEE" in entities:
+                    task_params["assigned_to"] = [entities["ASSIGNEE"]]
+                if "BUCKET_NAME" in entities:
+                    task_params["bucket_name"] = entities["BUCKET_NAME"]
 
                 suggestions.append({
                     "tool": "create_task",
                     "parameters": task_params,
-                    "confidence": intent_result.get("confidence", 0.0)
+                    "confidence": confidence,
+                    "direct_executable": True
                 })
 
-            elif intent == "list_tasks":
-                list_params = {}
-                if "PLAN_ID" in entities:
-                    list_params["plan_id"] = entities["PLAN_ID"]
-                if "PERSON" in entities:
-                    list_params["assignee"] = entities["PERSON"]
+            elif intent == "create_and_assign_task":
+                # Handle the user's specific case: assign task: [title] to [email]
+                task_params = {
+                    "title": entities.get("TASK_TITLE", "New Task"),
+                    "description": entities.get("DESCRIPTION", ""),
+                    "assigned_to": [entities.get("ASSIGNEE", "")],
+                    "plan_id": entities.get("PLAN_NAME", entities.get("PLAN_ID", ""))
+                }
+
+                # Add optional parameters
+                if "DUE_DATE" in entities:
+                    task_params["due_date"] = entities["DUE_DATE"]
+                if "PRIORITY" in entities:
+                    task_params["priority"] = entities["PRIORITY"]
+                if "BUCKET_NAME" in entities:
+                    task_params["bucket_name"] = entities["BUCKET_NAME"]
 
                 suggestions.append({
-                    "tool": "list_tasks",
-                    "parameters": list_params,
-                    "confidence": intent_result.get("confidence", 0.0)
+                    "tool": "create_task",
+                    "parameters": task_params,
+                    "confidence": min(0.95, confidence + 0.1),  # Boost confidence for explicit assign+create
+                    "direct_executable": True
                 })
 
-            elif intent == "search":
-                search_params = {
-                    "query": entities.get("SEARCH_TERM", ""),
-                    "include_completed": entities.get("INCLUDE_COMPLETED", True)
-                }
+            elif intent == "list_tasks" or intent == "read_tasks":
+                # Check if this is an assignee query (like "what tasks are assigned to...")
+                if "ASSIGNEE" in entities:
+                    # Use search_tasks for assignee queries since list_tasks doesn't support assignee parameter
+                    suggestions.append({
+                        "tool": "search_tasks",
+                        "parameters": {
+                            "query": entities["ASSIGNEE"],  # Search by assignee email
+                            "plan_id": entities.get("PLAN_NAME", entities.get("PLAN_ID", "")),
+                            "status": entities.get("STATUS", "all")
+                        },
+                        "confidence": confidence,
+                        "direct_executable": True
+                    })
+                else:
+                    # Regular list_tasks for non-assignee queries
+                    list_params = {}
+                    if "PLAN_NAME" in entities or "PLAN_ID" in entities:
+                        list_params["plan_id"] = entities.get("PLAN_NAME", entities.get("PLAN_ID"))
+                    if "STATUS" in entities:
+                        list_params["status"] = entities["STATUS"]
+
+                    suggestions.append({
+                        "tool": "list_tasks",
+                        "parameters": list_params,
+                        "confidence": confidence,
+                        "direct_executable": True
+                    })
+
+            elif intent == "update_task":
+                task_id = entities.get("TASK_TITLE", entities.get("TASK_ID", ""))
+                update_params = {"task_id": task_id}
+
+                # Add update fields
+                if "PRIORITY" in entities:
+                    update_params["priority"] = entities["PRIORITY"]
+                if "DUE_DATE" in entities:
+                    update_params["due_date"] = entities["DUE_DATE"]
+                if "START_DATE" in entities:
+                    update_params["start_date"] = entities["START_DATE"]
+                if "ASSIGNEE" in entities:
+                    update_params["assigned_to"] = [entities["ASSIGNEE"]]
+                if "STATUS" in entities:
+                    update_params["status"] = entities["STATUS"]
+                if "PROGRESS_PERCENTAGE" in entities:
+                    update_params["progress"] = int(entities["PROGRESS_PERCENTAGE"])
+
+                suggestions.append({
+                    "tool": "update_task",
+                    "parameters": update_params,
+                    "confidence": confidence,
+                    "direct_executable": True
+                })
+
+            elif intent == "complete_task":
+                suggestions.append({
+                    "tool": "update_task",
+                    "parameters": {
+                        "task_id": entities.get("TASK_TITLE", entities.get("TASK_ID", "")),
+                        "status": "completed",
+                        "progress": 100
+                    },
+                    "confidence": confidence,
+                    "direct_executable": True
+                })
+
+            elif intent == "delete_task":
+                suggestions.append({
+                    "tool": "delete_task",
+                    "parameters": {
+                        "task_id": entities.get("TASK_TITLE", entities.get("TASK_ID", ""))
+                    },
+                    "confidence": confidence,
+                    "direct_executable": True
+                })
+
+            elif intent == "search_tasks":
+                # Determine what to search for - prioritize assignee if present
+                search_query = ""
+                if "ASSIGNEE" in entities:
+                    search_query = entities["ASSIGNEE"]  # Search by assignee email
+                elif "SEARCH_TERM" in entities:
+                    search_query = entities["SEARCH_TERM"]
+                elif "TASK_TITLE" in entities:
+                    search_query = entities["TASK_TITLE"]
 
                 suggestions.append({
                     "tool": "search_tasks",
-                    "parameters": search_params,
-                    "confidence": intent_result.get("confidence", 0.0)
+                    "parameters": {
+                        "query": search_query,
+                        "plan_id": entities.get("PLAN_NAME", entities.get("PLAN_ID", "")),
+                        "status": entities.get("STATUS", "all")
+                    },
+                    "confidence": confidence,
+                    "direct_executable": True
+                })
+
+            elif intent == "get_my_tasks":
+                suggestions.append({
+                    "tool": "get_my_tasks",
+                    "parameters": {},
+                    "confidence": confidence,
+                    "direct_executable": True
+                })
+
+            elif intent == "get_task_details":
+                suggestions.append({
+                    "tool": "get_task_details",
+                    "parameters": {
+                        "task_id": entities.get("TASK_TITLE", entities.get("TASK_ID", ""))
+                    },
+                    "confidence": confidence,
+                    "direct_executable": True
+                })
+
+            elif intent == "get_next_task":
+                suggestions.append({
+                    "tool": "get_next_task",
+                    "parameters": {},
+                    "confidence": confidence,
+                    "direct_executable": True
+                })
+
+            elif intent == "get_task_by_position":
+                suggestions.append({
+                    "tool": "get_task_by_position",
+                    "parameters": {
+                        "position": int(entities.get("QUANTITY", 1))
+                    },
+                    "confidence": confidence,
+                    "direct_executable": True
+                })
+
+            # TASK ENHANCEMENT OPERATIONS
+            elif intent == "add_task_comment":
+                suggestions.append({
+                    "tool": "add_task_comment",
+                    "parameters": {
+                        "task_id": entities.get("TASK_TITLE", entities.get("TASK_ID", "")),
+                        "comment": entities.get("COMMENT_TEXT", "")
+                    },
+                    "confidence": confidence,
+                    "direct_executable": True
+                })
+
+            elif intent == "add_task_checklist":
+                checklist_items = []
+                if "CHECKLIST_ITEM" in entities:
+                    checklist_items.append(entities["CHECKLIST_ITEM"])
+
+                suggestions.append({
+                    "tool": "add_task_checklist",
+                    "parameters": {
+                        "task_id": entities.get("TASK_TITLE", entities.get("TASK_ID", "")),
+                        "checklist_items": checklist_items
+                    },
+                    "confidence": confidence,
+                    "direct_executable": True
+                })
+
+            elif intent == "update_task_checklist":
+                suggestions.append({
+                    "tool": "update_task_checklist",
+                    "parameters": {
+                        "task_id": entities.get("TASK_TITLE", entities.get("TASK_ID", "")),
+                        "item_index": int(entities.get("QUANTITY", 0)),
+                        "is_checked": True
+                    },
+                    "confidence": confidence,
+                    "direct_executable": True
+                })
+
+            # BUCKET MANAGEMENT OPERATIONS
+            elif intent == "list_buckets":
+                suggestions.append({
+                    "tool": "list_buckets",
+                    "parameters": {
+                        "plan_id": entities.get("PLAN_NAME", entities.get("PLAN_ID", ""))
+                    },
+                    "confidence": confidence,
+                    "direct_executable": True
+                })
+
+            elif intent == "create_bucket":
+                suggestions.append({
+                    "tool": "create_bucket",
+                    "parameters": {
+                        "name": entities.get("BUCKET_NAME", "New Bucket"),
+                        "plan_id": entities.get("PLAN_NAME", entities.get("PLAN_ID", ""))
+                    },
+                    "confidence": confidence,
+                    "direct_executable": True
+                })
+
+            elif intent == "update_bucket":
+                suggestions.append({
+                    "tool": "update_bucket",
+                    "parameters": {
+                        "bucket_id": entities.get("BUCKET_NAME", ""),
+                        "name": entities.get("BUCKET_NAME", ""),
+                        "plan_id": entities.get("PLAN_NAME", entities.get("PLAN_ID", ""))
+                    },
+                    "confidence": confidence,
+                    "direct_executable": True
+                })
+
+            elif intent == "delete_bucket":
+                suggestions.append({
+                    "tool": "delete_bucket",
+                    "parameters": {
+                        "bucket_id": entities.get("BUCKET_NAME", "")
+                    },
+                    "confidence": confidence,
+                    "direct_executable": True
+                })
+
+            # DOCUMENT & KNOWLEDGE OPERATIONS
+            elif intent == "create_tasks_from_document":
+                suggestions.append({
+                    "tool": "create_tasks_from_document",
+                    "parameters": {
+                        "document_path": entities.get("DOCUMENT_PATH", ""),
+                        "plan_id": entities.get("PLAN_NAME", entities.get("PLAN_ID", ""))
+                    },
+                    "confidence": confidence,
+                    "direct_executable": True
+                })
+
+            elif intent == "search_documents":
+                suggestions.append({
+                    "tool": "search_documents",
+                    "parameters": {
+                        "query": entities.get("SEARCH_TERM", entities.get("DOCUMENT_PATH", ""))
+                    },
+                    "confidence": confidence,
+                    "direct_executable": True
+                })
+
+            elif intent == "analyze_project_relationships":
+                suggestions.append({
+                    "tool": "analyze_project_relationships",
+                    "parameters": {
+                        "project_id": entities.get("PROJECT_ID", entities.get("PLAN_ID", ""))
+                    },
+                    "confidence": confidence,
+                    "direct_executable": True
+                })
+
+            # FALLBACK: General search
+            elif intent in ["search", "help"]:
+                suggestions.append({
+                    "tool": "search_tasks",
+                    "parameters": {
+                        "query": entities.get("SEARCH_TERM", entities.get("TASK_TITLE", "")),
+                        "include_completed": True
+                    },
+                    "confidence": max(0.3, confidence - 0.2),  # Lower confidence for fallback
+                    "direct_executable": True
                 })
 
             # Handle batch operations
@@ -1668,13 +2394,14 @@ class ProcessNaturalLanguage(Tool):
                         "batch_parameters": batch_operation
                     },
                     "confidence": 0.8,
-                    "is_batch": True
+                    "is_batch": True,
+                    "direct_executable": True
                 })
 
             return suggestions
 
         except Exception as e:
-            logger.error("Error generating action suggestions", error=str(e))
+            logger.error("Error generating direct routing suggestions", error=str(e))
             return []
 
 
@@ -2722,12 +3449,19 @@ class ToolRegistry:
         self.cache_service = cache_service
         self.tools: Dict[str, Tool] = {}
 
+        # Initialize required fields handler
+        self.required_fields_handler = RequiredFieldsHandler(cache_service, graph_client)
+
         # Initialize NLP components
         self.intent_classifier = IntentClassifier()
         self.entity_extractor = EntityExtractor()
         self.date_parser = DateParser()
         self.context_manager = ConversationContextManager(database=database)
         self.batch_processor = BatchProcessor()
+
+        # Initialize semantic processing components
+        self.hybrid_ner = HybridNER()
+        self.semantic_intent_matcher = SemanticIntentMatcher(use_chromadb=False)  # Use fallback initially
 
     async def initialize(self):
         """Initialize all tools"""
@@ -2754,6 +3488,9 @@ class ToolRegistry:
             self.tools["get_task_by_position"] = GetTaskByPosition(self.graph_client, self.database)
             self.tools["get_next_task"] = GetNextTask(self.graph_client, self.database)
             self.tools["list_buckets"] = ListBuckets(self.graph_client, self.database)
+            self.tools["create_bucket"] = CreateBucket(self.graph_client, self.database)
+            self.tools["update_bucket"] = UpdateBucket(self.graph_client, self.database)
+            self.tools["delete_bucket"] = DeleteBucket(self.graph_client, self.database)
 
             # Register search tools
             self.tools["search_plans"] = SearchPlans(self.graph_client, self.database)
@@ -2766,13 +3503,19 @@ class ToolRegistry:
             self.tools["analyze_project_relationships"] = AnalyzeProjectRelationships(self.graph_client, self.database)
             self.tools["update_knowledge_graph"] = UpdateKnowledgeGraph(self.graph_client, self.database)
 
+            # Initialize semantic processing components
+            await self.hybrid_ner.initialize()
+            await self.semantic_intent_matcher.initialize()
+
             # Register NLP processing tool (Story 1.3)
             nlp_components = {
                 "intent_classifier": self.intent_classifier,
                 "entity_extractor": self.entity_extractor,
                 "date_parser": self.date_parser,
                 "context_manager": self.context_manager,
-                "batch_processor": self.batch_processor
+                "batch_processor": self.batch_processor,
+                "hybrid_ner": self.hybrid_ner,
+                "semantic_intent_matcher": self.semantic_intent_matcher
             }
             self.tools["process_natural_language"] = ProcessNaturalLanguage(
                 self.graph_client, self.database, nlp_components
@@ -2792,9 +3535,10 @@ class ToolRegistry:
         self,
         tool_name: str,
         arguments: Dict[str, Any],
-        user_id: str = "default"
+        user_id: str = "default",
+        session_id: str = "default"
     ) -> ToolResult:
-        """Execute a tool by name"""
+        """Execute a tool by name with required fields checking"""
         try:
             if tool_name not in self.tools:
                 return ToolResult(
@@ -2805,8 +3549,24 @@ class ToolRegistry:
             tool = self.tools[tool_name]
             context = {
                 "user_id": user_id,
+                "session_id": session_id,
                 "timestamp": datetime.utcnow().isoformat()
             }
+
+            # Check for required fields before execution
+            tool_definition = tool._define_parameters()
+            all_fields_present, prompt_response = await self.required_fields_handler.check_required_fields(
+                tool_name, tool_definition, arguments, context
+            )
+
+            if not all_fields_present:
+                logger.info("Missing required fields for tool", tool=tool_name, missing=prompt_response["content"]["missing_fields"])
+                return ToolResult(
+                    success=False,
+                    content=prompt_response["content"],
+                    error=prompt_response["content"]["message"],
+                    metadata=prompt_response["metadata"]
+                )
 
             logger.info("Executing tool", tool=tool_name, arguments=arguments, user_id=user_id)
 
@@ -2825,4 +3585,39 @@ class ToolRegistry:
             return ToolResult(
                 success=False,
                 error=f"Tool execution failed: {str(e)}"
+            )
+
+    async def complete_partial_request(
+        self,
+        session_id: str,
+        tool_name: str,
+        provided_values: Dict[str, Any],
+        user_id: str = "default"
+    ) -> ToolResult:
+        """Complete a partial request with newly provided field values"""
+        try:
+            # Get and complete the partial request
+            complete_request = await self.required_fields_handler.complete_partial_request(
+                session_id, tool_name, provided_values
+            )
+
+            if not complete_request:
+                return ToolResult(
+                    success=False,
+                    error="No partial request found. Please start a new request."
+                )
+
+            # Execute the completed tool request
+            return await self.execute_tool(
+                complete_request["tool_name"],
+                complete_request["arguments"],
+                user_id,
+                session_id
+            )
+
+        except Exception as e:
+            logger.error("Error completing partial request", error=str(e))
+            return ToolResult(
+                success=False,
+                error=f"Failed to complete request: {str(e)}"
             )

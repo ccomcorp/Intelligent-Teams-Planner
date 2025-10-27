@@ -50,6 +50,10 @@ class EntityExtractor:
                 "patterns": [
                     r'"([^"]+)"',  # Quoted strings
                     r"'([^']+)'",  # Single quoted strings
+                    # Enhanced pattern for assign task: [task title] to [assignee]
+                    r"(?:assign\s+task:?\s+)([^,\.]+?)\s+to\s+[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}",
+                    r"(?:assign\s+task:?\s+)([^,\.]+?)\s+to\s+\w+",
+                    r"(?:create|add|make)\s+task:?\s+([^,\.]+?)(?:\s+to|\s+for|\s+assign|$)",
                     r"(?:task|assignment|todo)(?:\s+(?:to|for|about))?\s+([^,\.]+)",  # task to...
                     r"(?:create|add|make)\s+(?:a\s+)?(?:task\s+)?(?:to\s+)?([^,\.]+)",  # create task to...
                 ],
@@ -71,12 +75,18 @@ class EntityExtractor:
             },
             "ASSIGNEE": {
                 "patterns": [
+                    # Question patterns - highest priority for "what tasks are assigned to..."
+                    r"(?:what\s+tasks?\s+are\s+)?assigned\s+to\s+([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})",
+                    r"(?:show|list|find)\s+tasks?\s+assigned\s+to\s+([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})",
+                    # Enhanced email pattern - highest priority
+                    r"(?:to|for|assign(?:ed)?\s+to|delegate\s+to)\s+([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})",
+                    r"([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})",  # Standalone email addresses
+                    # Traditional name patterns
                     r"(?:assign|give|delegate|transfer)(?:\s+(?:to|it\s+to))?\s+([A-Za-z]+(?:\s+[A-Za-z]+)?)",
                     r"(?:for|by)\s+([A-Za-z]+(?:\s+[A-Za-z]+)?)",
                     r"@([A-Za-z0-9\._-]+)",  # @mentions
-                    r"([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})",  # Email addresses
                 ],
-                "context_words": ["assign", "assignee", "for", "by", "delegate", "give"]
+                "context_words": ["assign", "assignee", "for", "by", "delegate", "give", "to", "assigned", "what tasks"]
             },
             "PLAN_NAME": {
                 "patterns": [
@@ -109,6 +119,86 @@ class EntityExtractor:
                     r"(?:create|add|make)\s+(\d+)",
                 ],
                 "context_words": ["tasks", "items", "multiple", "batch"]
+            },
+            # NEW UNIVERSAL ENTITY TYPES
+            "BUCKET_NAME": {
+                "patterns": [
+                    r"(?:bucket|category|column)\s+([^,\.]+)",
+                    r"(?:in|to|from)\s+(?:the\s+)?([A-Z][^,\.]*?)\s+(?:bucket|category|column)",
+                    r"([A-Z][a-zA-Z\s]+)\s+(?:bucket|category|column)",
+                ],
+                "context_words": ["bucket", "category", "column", "group"]
+            },
+            "COMMENT_TEXT": {
+                "patterns": [
+                    r"(?:comment|note):\s*([^,\n]+)",
+                    r"(?:add|post|leave)\s+(?:comment|note)\s*:\s*([^,\n]+)",
+                    r"(?:say|write|note)\s*:\s*([^,\n]+)",
+                ],
+                "context_words": ["comment", "note", "say", "write", "post"]
+            },
+            "CHECKLIST_ITEM": {
+                "patterns": [
+                    r"(?:checklist|check)\s+item\s*:\s*([^,\n]+)",
+                    r"(?:add|create)\s+(?:checklist\s+)?item\s*:\s*([^,\n]+)",
+                    r"(?:check|mark|complete)\s+item\s+(\d+)",
+                ],
+                "context_words": ["checklist", "item", "check", "mark", "complete"]
+            },
+            "DOCUMENT_PATH": {
+                "patterns": [
+                    r"(?:document|file)\s+([^\s,\.]+(?:\.[a-zA-Z]+)?)",
+                    r"(?:from|in)\s+(?:document|file)\s+([^\s,\.]+)",
+                    r"([^\s,]+\.(?:pdf|doc|docx|txt|xlsx|pptx))",
+                ],
+                "context_words": ["document", "file", "pdf", "doc", "excel"]
+            },
+            "PROGRESS_PERCENTAGE": {
+                "patterns": [
+                    r"(\d{1,3})%",
+                    r"(\d{1,3})\s*percent",
+                    r"(?:progress|complete)\s+(\d{1,3})%",
+                    r"(?:set|update)\s+(?:to\s+)?(\d{1,3})%",
+                ],
+                "context_words": ["progress", "percent", "complete", "done"]
+            },
+            "START_DATE": {
+                "patterns": [
+                    r"(?:start|begin|commence)(?:\s+on|\s+date)?\s+(tomorrow|today|yesterday)",
+                    r"(?:start|begin|commence)(?:\s+on|\s+date)?\s+(.+?(?:week|month|day|year|friday|monday|tuesday|wednesday|thursday|saturday|sunday))",
+                    r"(?:start|begin|commence)(?:\s+on|\s+date)?\s+(\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4})",
+                ],
+                "context_words": ["start", "begin", "commence", "from"]
+            },
+            "DESCRIPTION": {
+                "patterns": [
+                    r"(?:description|desc|details?):\s*([^,\n]+)",
+                    r"(?:with\s+)?(?:description|details?)\s*:\s*([^,\n]+)",
+                    r"(?:described\s+as|detail)\s*:\s*([^,\n]+)",
+                ],
+                "context_words": ["description", "details", "desc", "about"]
+            },
+            "USER_MENTION": {
+                "patterns": [
+                    r"@([a-zA-Z0-9\._-]+)",
+                    r"@([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})",
+                ],
+                "context_words": ["mention", "notify", "alert"]
+            },
+            "BATCH_COUNT": {
+                "patterns": [
+                    r"(?:create|generate|add)\s+(\d+)\s+(?:tasks|items)",
+                    r"batch\s+of\s+(\d+)",
+                    r"(\d+)\s+(?:at\s+once|together|simultaneously)",
+                ],
+                "context_words": ["batch", "multiple", "bulk", "mass"]
+            },
+            "PROJECT_ID": {
+                "patterns": [
+                    r"(?:project|proj)\s+(?:id\s+)?([A-Za-z0-9\-_]+)",
+                    r"(?:in\s+)?project\s*:\s*([A-Za-z0-9\-_]+)",
+                ],
+                "context_words": ["project", "proj", "id"]
             }
         }
 
@@ -349,13 +439,35 @@ class EntityExtractor:
             if any(word in value.lower() for word in ["urgent", "critical", "high", "medium", "low", "normal"]):
                 base_confidence += 0.15
 
-        # Validate entity value
-        if entity_type == "ASSIGNEE" and "@" in value:
-            base_confidence += 0.1  # Email addresses are more reliable
+        # Validate entity value and boost confidence for high-quality entities
+        if entity_type == "ASSIGNEE":
+            if "@" in value:
+                base_confidence += 0.2  # Email addresses are highly reliable
+            if re.match(r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$', value):
+                base_confidence += 0.15  # Valid email format gets extra boost
 
         if entity_type == "DUE_DATE" and any(word in value.lower()
                                            for word in ["today", "tomorrow", "next", "this"]):
             base_confidence += 0.1  # Relative dates are clear
+
+        if entity_type == "PROGRESS_PERCENTAGE":
+            if re.match(r'^\d{1,3}%?$', value):
+                base_confidence += 0.15  # Clear percentage format
+
+        if entity_type == "DOCUMENT_PATH":
+            if re.search(r'\.[a-zA-Z]{2,4}$', value):
+                base_confidence += 0.1  # File extensions indicate real files
+
+        if entity_type == "USER_MENTION":
+            if value.startswith('@'):
+                base_confidence += 0.1  # @ mentions are explicit
+
+        if entity_type == "BUCKET_NAME":
+            # Boost confidence when bucket keywords are present
+            bucket_keywords = ["bucket", "category", "column", "group"]
+            keyword_in_text = any(word in full_text.lower() for word in bucket_keywords)
+            if keyword_in_text:
+                base_confidence += 0.2
 
         return min(base_confidence, 0.95)  # Cap at 95%
 
@@ -417,6 +529,26 @@ class EntityExtractor:
                 # Convert word numbers to digits
                 entity.value = self._normalize_quantity(entity.value)
 
+            elif entity.type == "PROGRESS_PERCENTAGE":
+                # Ensure percentage is a valid number
+                entity.value = self._normalize_percentage(entity.value)
+
+            elif entity.type == "BUCKET_NAME":
+                # Clean up bucket names
+                entity.value = self._clean_bucket_name(entity.value)
+
+            elif entity.type == "COMMENT_TEXT":
+                # Clean up comment text
+                entity.value = self._clean_comment_text(entity.value)
+
+            elif entity.type == "DESCRIPTION":
+                # Clean up descriptions
+                entity.value = self._clean_description(entity.value)
+
+            elif entity.type == "USER_MENTION":
+                # Clean up user mentions
+                entity.value = self._clean_user_mention(entity.value)
+
             # Validate entity value
             if self._validate_entity(entity):
                 processed.append(entity)
@@ -444,6 +576,43 @@ class EntityExtractor:
         }
         return word_to_num.get(quantity.lower(), quantity)
 
+    def _normalize_percentage(self, percentage: str) -> str:
+        """Normalize percentage values"""
+        # Remove % symbol and 'percent' text, extract just the number
+        cleaned = re.sub(r'[%\s]|percent', '', percentage.lower())
+        try:
+            value = int(cleaned)
+            # Ensure percentage is between 0 and 100
+            value = max(0, min(100, value))
+            return str(value)
+        except ValueError:
+            return "0"
+
+    def _clean_bucket_name(self, name: str) -> str:
+        """Clean up bucket names"""
+        # Remove common prefixes/suffixes
+        name = re.sub(r'^(bucket|category|column)\s+', '', name, flags=re.IGNORECASE)
+        name = re.sub(r'\s+(bucket|category|column)$', '', name, flags=re.IGNORECASE)
+        return name.strip()
+
+    def _clean_comment_text(self, text: str) -> str:
+        """Clean up comment text"""
+        # Remove comment prefixes
+        text = re.sub(r'^(comment|note):\s*', '', text, flags=re.IGNORECASE)
+        return text.strip()
+
+    def _clean_description(self, text: str) -> str:
+        """Clean up description text"""
+        # Remove description prefixes
+        text = re.sub(r'^(description|desc|details?):\s*', '', text, flags=re.IGNORECASE)
+        text = re.sub(r'^(with\s+)?(description|details?)\s*:\s*', '', text, flags=re.IGNORECASE)
+        return text.strip()
+
+    def _clean_user_mention(self, mention: str) -> str:
+        """Clean up user mentions"""
+        # Remove @ symbol if present
+        return mention.lstrip('@').strip()
+
     def _validate_entity(self, entity: ExtractedEntity) -> bool:
         """Validate if an entity value is reasonable"""
         if not entity.value or len(entity.value.strip()) == 0:
@@ -460,6 +629,46 @@ class EntityExtractor:
         elif entity.type == "QUANTITY":
             # Quantity should be a number
             return entity.value.isdigit() or entity.value in ["one", "two", "three", "four", "five"]
+
+        elif entity.type == "PROGRESS_PERCENTAGE":
+            # Progress should be a valid percentage (0-100)
+            try:
+                value = int(entity.value)
+                return 0 <= value <= 100
+            except ValueError:
+                return False
+
+        elif entity.type == "BUCKET_NAME":
+            # Bucket name should be meaningful
+            return len(entity.value) >= 2 and not entity.value.isdigit()
+
+        elif entity.type == "COMMENT_TEXT":
+            # Comment should be meaningful
+            return len(entity.value) >= 3
+
+        elif entity.type == "DESCRIPTION":
+            # Description should be meaningful
+            return len(entity.value) >= 3
+
+        elif entity.type == "DOCUMENT_PATH":
+            # Document path should have some reasonable format
+            return len(entity.value) >= 3 and ('.' in entity.value or '/' in entity.value)
+
+        elif entity.type == "USER_MENTION":
+            # User mention should be reasonable
+            return len(entity.value) >= 2 and not entity.value.isdigit()
+
+        elif entity.type == "BATCH_COUNT":
+            # Batch count should be a valid number
+            try:
+                value = int(entity.value)
+                return 1 <= value <= 100  # Reasonable batch sizes
+            except ValueError:
+                return False
+
+        elif entity.type == "PROJECT_ID":
+            # Project ID should be alphanumeric
+            return len(entity.value) >= 2 and entity.value.replace('-', '').replace('_', '').isalnum()
 
         return True
 

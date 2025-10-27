@@ -1,0 +1,189 @@
+# Intelligent Teams Planner - Local Development Caddy Configuration
+# Optimized for local development with proper SSL certificates
+
+# =============================================================================
+# MAIN APPLICATION INTERFACE - OpenWebUI with Authentication
+# =============================================================================
+:8844 {
+    # Local development certificate
+    tls /etc/caddy/certs/localhost.pem /etc/caddy/certs/localhost-key.pem
+
+    # Enable detailed logging
+    log {
+        output stdout
+        format console
+        level INFO
+    }
+
+    # Root path serves OpenWebUI
+    reverse_proxy openwebui:8080
+}
+
+# =============================================================================
+# MCP SERVER - OAuth Callbacks and API Endpoints
+# =============================================================================
+:8444 {
+    # Local development certificate
+    tls /etc/caddy/certs/localhost.pem /etc/caddy/certs/localhost-key.pem
+
+    # Enable detailed logging
+    log {
+        output stdout
+        format console
+        level INFO
+    }
+
+    # OAuth authentication callbacks - CRITICAL for Azure AD
+    handle /auth/* {
+        reverse_proxy itp-planner-mcp-simple:7100 {
+            header_up Host {http.request.host}
+            header_up X-Real-IP {http.request.remote.host}
+            header_up X-Forwarded-For {http.request.remote.host}
+            header_up X-Forwarded-Proto {http.request.scheme}
+        }
+    }
+
+    # MCP API endpoints
+    handle /api/* {
+        reverse_proxy itp-planner-mcp-simple:7100 {
+            header_up Host {http.request.host}
+            header_up X-Real-IP {http.request.remote.host}
+            header_up X-Forwarded-For {http.request.remote.host}
+            header_up X-Forwarded-Proto {http.request.scheme}
+        }
+    }
+
+    # Tools endpoints
+    handle /tools/* {
+        reverse_proxy itp-planner-mcp-simple:7100 {
+            header_up Host {http.request.host}
+            header_up X-Real-IP {http.request.remote.host}
+            header_up X-Forwarded-For {http.request.remote.host}
+            header_up X-Forwarded-Proto {http.request.scheme}
+        }
+    }
+
+    # Health check and root
+    handle / {
+        reverse_proxy itp-planner-mcp-simple:7100 {
+            header_up Host {http.request.host}
+            header_up X-Real-IP {http.request.remote.host}
+            header_up X-Forwarded-For {http.request.remote.host}
+            header_up X-Forwarded-Proto {http.request.scheme}
+        }
+    }
+}
+
+# =============================================================================
+# MCPO PROXY - OpenAI API Proxy
+# =============================================================================
+:8445 {
+    # Local development certificate
+    tls /etc/caddy/certs/localhost.pem /etc/caddy/certs/localhost-key.pem
+
+    # Enable detailed logging
+    log {
+        output stdout
+        format console
+        level INFO
+    }
+
+    # OpenAI API v1 endpoints (highest priority)
+    handle /v1/* {
+        reverse_proxy itp-mcpo-proxy-simple:7105 {
+            header_up Host {http.request.host}
+            header_up X-Real-IP {http.request.remote.host}
+            header_up X-Forwarded-For {http.request.remote.host}
+            header_up X-Forwarded-Proto {http.request.scheme}
+        }
+    }
+
+    # Health check endpoint for monitoring
+    handle /health {
+        reverse_proxy itp-mcpo-proxy-simple:7105 {
+            header_up Host {http.request.host}
+            header_up X-Real-IP {http.request.remote.host}
+            header_up X-Forwarded-For {http.request.remote.host}
+            header_up X-Forwarded-Proto {http.request.scheme}
+        }
+    }
+
+    # Other API endpoints
+    handle /tools/* {
+        reverse_proxy itp-mcpo-proxy-simple:7105 {
+            header_up Host {http.request.host}
+            header_up X-Real-IP {http.request.remote.host}
+            header_up X-Forwarded-For {http.request.remote.host}
+            header_up X-Forwarded-Proto {http.request.scheme}
+        }
+    }
+
+    handle /info {
+        reverse_proxy itp-mcpo-proxy-simple:7105 {
+            header_up Host {http.request.host}
+            header_up X-Real-IP {http.request.remote.host}
+            header_up X-Forwarded-For {http.request.remote.host}
+            header_up X-Forwarded-Proto {http.request.scheme}
+        }
+    }
+
+    # Proxy all other requests to MCPO Proxy (catch-all)
+    handle {
+        reverse_proxy itp-mcpo-proxy-simple:7105 {
+            header_up Host {http.request.host}
+            header_up X-Real-IP {http.request.remote.host}
+            header_up X-Forwarded-For {http.request.remote.host}
+            header_up X-Forwarded-Proto {http.request.scheme}
+        }
+    }
+}
+
+# =============================================================================
+# TEAMS BOT - Microsoft Teams Integration
+# =============================================================================
+:8446 {
+    # Local development certificate
+    tls /etc/caddy/certs/localhost.pem /etc/caddy/certs/localhost-key.pem
+
+    # Enable detailed logging
+    log {
+        output stdout
+        format console
+        level INFO
+    }
+
+    # Proxy all requests to Teams Bot
+    handle / {
+        reverse_proxy itp-teams-bot-simple:7110 {
+            header_up Host {http.request.host}
+            header_up X-Real-IP {http.request.remote.host}
+            header_up X-Forwarded-For {http.request.remote.host}
+            header_up X-Forwarded-Proto {http.request.scheme}
+        }
+    }
+}
+
+# =============================================================================
+# RAG SERVICE - Document and Knowledge Management
+# =============================================================================
+:8447 {
+    # Local development certificate
+    tls /etc/caddy/certs/localhost.pem /etc/caddy/certs/localhost-key.pem
+
+    # Enable detailed logging
+    log {
+        output stdout
+        format console
+        level INFO
+    }
+
+    # Proxy all requests to RAG Service
+    handle / {
+        reverse_proxy itp-rag-service-simple:7120 {
+            header_up Host {http.request.host}
+            header_up X-Real-IP {http.request.remote.host}
+            header_up X-Forwarded-For {http.request.remote.host}
+            header_up X-Forwarded-Proto {http.request.scheme}
+        }
+    }
+}

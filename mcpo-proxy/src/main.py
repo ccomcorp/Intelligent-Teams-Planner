@@ -95,8 +95,8 @@ async def lifespan(app: FastAPI):
         openai_translator = OpenAITranslator(mcp_client, proxy_cache)
         await openai_translator.initialize()
 
-        # Add dynamic routes to app
-        app.include_router(dynamic_routes.get_router())
+        # Add dynamic routes to app under /v1 prefix
+        app.include_router(dynamic_routes.get_router(), prefix="/v1")
 
         logger.info("MCPO Proxy initialized successfully with all components")
 
@@ -132,11 +132,25 @@ app.add_middleware(
 # OpenAI-compatible API models
 
 
+class FunctionCall(BaseModel):
+    """Function call model"""
+    name: str
+    arguments: str
+
+
 class ChatMessage(BaseModel):
     """Chat message model"""
-    role: str = Field(..., description="Message role (user, assistant, system)")
-    content: str = Field(..., description="Message content")
-    name: Optional[str] = Field(None, description="Message author name")
+    role: str = Field(..., description="Message role (user, assistant, system, function)")
+    content: Optional[str] = Field(None, description="Message content")
+    name: Optional[str] = Field(None, description="Message author name or function name")
+    function_call: Optional[FunctionCall] = Field(None, description="Function call")
+
+
+class FunctionDefinition(BaseModel):
+    """Function definition for function calling"""
+    name: str
+    description: str
+    parameters: Dict[str, Any]
 
 
 class ChatCompletionRequest(BaseModel):
@@ -148,6 +162,8 @@ class ChatCompletionRequest(BaseModel):
     stream: bool = Field(False, description="Stream response")
     user: Optional[str] = Field(None, description="User identifier")
     conversation_id: Optional[str] = Field(None, description="Conversation ID for context")
+    functions: Optional[List[FunctionDefinition]] = Field(None, description="Available functions for calling")
+    function_call: Optional[str] = Field(None, description="Control function calling behavior")
 
 
 class ChatCompletionChoice(BaseModel):
@@ -180,6 +196,11 @@ class ModelInfo(BaseModel):
     object: str = "model"
     created: int
     owned_by: str
+    capabilities: dict = {
+        "function_calling": True,
+        "tools": True,
+        "vision": False
+    }
 
 
 class ModelsResponse(BaseModel):
@@ -219,9 +240,26 @@ async def get_protocol_translator() -> ProtocolTranslator:
     """Get protocol translator instance"""
     return protocol_translator
 
+# Root endpoint for basic info and health check
+@app.get("/")
+async def root():
+    """Root endpoint - redirect to proxy info"""
+    return {
+        "name": "MCPO Proxy",
+        "version": "2.0.0",
+        "description": "OpenWebUI to Model Context Protocol translation layer",
+        "status": "running",
+        "endpoints": {
+            "health": "/health",
+            "info": "/info",
+            "models": "/v1/models",
+            "chat": "/v1/chat/completions",
+            "tools": "/v1/tools"
+        }
+    }
+
+
 # Health check
-
-
 @app.get("/health")
 async def health_check():
     """Enhanced health check endpoint with comprehensive system status"""
@@ -275,11 +313,25 @@ async def list_models():
 @app.post("/v1/chat/completions")
 async def create_chat_completion(
     request: ChatCompletionRequest,
-    translator: OpenAITranslator = Depends(get_translator)
+    translator: OpenAITranslator = Depends(get_translator),
+    dynamic_routes: DynamicRouteGenerator = Depends(get_dynamic_routes)
 ):
     """Create chat completion (OpenAI compatibility)"""
     try:
         logger.info("Processing chat completion", user=request.user, model=request.model)
+
+        # If no functions provided, auto-add planner functions for OpenWebUI
+        if not request.functions:
+            functions_data = await dynamic_routes.get_available_tools()
+            request.functions = [
+                FunctionDefinition(
+                    name=tool["name"],
+                    description=tool["description"],
+                    parameters=tool["schema"]
+                )
+                for tool in functions_data
+            ]
+            logger.info("Auto-added planner functions", function_count=len(request.functions))
 
         # Translate OpenAI request to MCP tool calls
         response = await translator.process_chat_completion(request)
@@ -291,29 +343,61 @@ async def create_chat_completion(
             import json
 
             def create_sse_response():
-                # Convert complete response to streaming format
-                chunk = {
+                # Convert complete response to streaming format for OpenWebUI compatibility
+                content = response["choices"][0]["message"]["content"]
+
+                # Send content in chunks for better UX
+                words = content.split(' ')
+                chunk_size = 5  # Words per chunk
+
+                for i in range(0, len(words), chunk_size):
+                    chunk_content = ' '.join(words[i:i+chunk_size])
+                    if i + chunk_size < len(words):
+                        chunk_content += ' '
+
+                    chunk = {
+                        "id": response["id"],
+                        "object": "chat.completion.chunk",
+                        "created": response["created"],
+                        "model": response["model"],
+                        "choices": [{
+                            "index": 0,
+                            "delta": {"content": chunk_content},
+                            "finish_reason": None
+                        }]
+                    }
+                    yield f"data: {json.dumps(chunk)}\n\n"
+
+                # Final chunk with finish_reason
+                final_chunk = {
                     "id": response["id"],
                     "object": "chat.completion.chunk",
                     "created": response["created"],
                     "model": response["model"],
                     "choices": [{
                         "index": 0,
-                        "delta": {"content": response["choices"][0]["message"]["content"]},
+                        "delta": {},
                         "finish_reason": "stop"
                     }]
                 }
-                yield f"data: {json.dumps(chunk)}\n\n"
+                yield f"data: {json.dumps(final_chunk)}\n\n"
                 yield "data: [DONE]\n\n"
 
             return StreamingResponse(
                 create_sse_response(),
-                media_type="text/plain",
-                headers={"Cache-Control": "no-cache", "Connection": "keep-alive"}
+                media_type="text/event-stream",
+                headers={
+                    "Cache-Control": "no-cache",
+                    "Connection": "keep-alive",
+                    "Access-Control-Allow-Origin": "*",
+                    "Access-Control-Allow-Headers": "Content-Type",
+                    "X-Accel-Buffering": "no"
+                }
             )
         else:
-            # Return complete response
-            return response
+            # Return complete response as JSON
+            from fastapi.responses import JSONResponse
+            return JSONResponse(content=response)
 
     except Exception as e:
         logger.error("Error processing chat completion", error=str(e))
@@ -353,6 +437,33 @@ async def list_tools_v1(
         }
     except Exception as e:
         logger.error("Error listing tools v1", error=str(e))
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/v1/functions")
+async def list_functions(
+    dynamic_routes: DynamicRouteGenerator = Depends(get_dynamic_routes)
+):
+    """List available functions in OpenAI format for function calling"""
+    try:
+        tools = await dynamic_routes.get_available_tools()
+        functions = []
+
+        for tool in tools:
+            # Convert tool schema to OpenAI function format
+            function = {
+                "name": tool["name"],
+                "description": tool["description"],
+                "parameters": tool["schema"]
+            }
+            functions.append(function)
+
+        return {
+            "object": "list",
+            "data": functions
+        }
+    except Exception as e:
+        logger.error("Error listing functions", error=str(e))
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -426,7 +537,7 @@ async def get_login_url(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/auth/callback")
+@app.get("/auth/callback")
 async def auth_callback(
     code: str,
     state: str,
@@ -451,22 +562,9 @@ async def get_openapi_spec():
 
 
 @app.get("/v1/openapi.json")
-async def get_dynamic_openapi_spec(
-    mcp_client: MCPClient = Depends(get_mcp_client),
-    openapi_generator: OpenAPIGenerator = Depends(get_openapi_generator)
-):
-    """Get dynamically generated OpenAPI specification from MCP tools"""
-    try:
-        # Get current tools from MCP server
-        tools = await mcp_client.list_tools()
-
-        # Generate OpenAPI specification
-        spec = openapi_generator.generate_openapi_spec(tools)
-
-        return spec
-    except Exception as e:
-        logger.error("Error generating dynamic OpenAPI spec", error=str(e))
-        raise HTTPException(status_code=500, detail=str(e))
+async def get_dynamic_openapi_spec():
+    """Get FastAPI OpenAPI specification including dynamic tool schemas"""
+    return app.openapi()
 
 # WebSocket endpoint for real-time communication
 

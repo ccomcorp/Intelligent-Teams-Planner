@@ -77,7 +77,8 @@ class OpenAPIGenerator:
                 return
 
             tool_description = tool.get("description", f"Execute {tool_name} tool")
-            input_schema = tool.get("inputSchema", {})
+            # Extract the input schema from parameters field (MCP tools structure)
+            input_schema = tool.get("inputSchema", tool.get("parameters", {}))
 
             # Create path for tool execution
             path = f"/tools/{tool_name}"

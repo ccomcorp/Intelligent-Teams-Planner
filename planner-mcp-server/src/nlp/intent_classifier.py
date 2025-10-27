@@ -65,9 +65,14 @@ class IntentClassifier:
                     "Find tasks assigned to John",
                     "Get my overdue tasks",
                     "Search for tasks about budget",
-                    "What tasks do I have today?"
+                    "What tasks do I have today?",
+                    "What tasks are assigned to angel@ccomgroupinc.com",
+                    "What tasks are assigned to john.smith@company.com",
+                    "Show tasks assigned to sarah@team.com",
+                    "List tasks assigned to admin@domain.com",
+                    "Find tasks assigned to user@example.com"
                 ],
-                "keywords": ["show", "list", "get", "find", "search", "view", "display", "my tasks", "what tasks"]
+                "keywords": ["show", "list", "get", "find", "search", "view", "display", "my tasks", "what tasks", "assigned to", "assigned"]
             },
             "update_task": {
                 "description": "Update or modify existing tasks",
@@ -100,7 +105,7 @@ class IntentClassifier:
                 "keywords": ["delete", "remove", "drop", "cancel", "eliminate", "clear"]
             },
             "assign_task": {
-                "description": "Assign tasks to team members",
+                "description": "Assign existing tasks to team members",
                 "examples": [
                     "Assign the budget task to Sarah",
                     "Give the presentation task to John",
@@ -110,6 +115,17 @@ class IntentClassifier:
                     "Set the assignee to Alice"
                 ],
                 "keywords": ["assign", "give", "delegate", "transfer", "set assignee", "allocate"]
+            },
+            "create_and_assign_task": {
+                "description": "Create a new task and assign it to someone",
+                "examples": [
+                    "assign task: configure ssl on servers to angel@company.com",
+                    "create task configure website and assign to john@team.com",
+                    "assign new task budget review to sarah.smith@company.com",
+                    "delegate task: update documentation to dev@team.com",
+                    "assign task configure ssl on ais for all commgroupinc.ai sites to angel@ccomgroupinc.com"
+                ],
+                "keywords": ["assign task:", "create task", "delegate task:", "new task", "assign new"]
             },
             "complete_task": {
                 "description": "Mark tasks as complete or done",
@@ -212,6 +228,23 @@ class IntentClassifier:
 
             # Normalize input
             normalized_input = user_input.lower().strip()
+
+            # Pre-processing: Check for create+assign patterns FIRST
+            create_assign_patterns = [
+                r"assign\s+task:?\s+.+\s+to\s+[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}",
+                r"assign\s+task:?\s+.+\s+to\s+\w+",
+                r"create\s+task\s+.+\s+(?:and\s+)?assign\s+to\s+",
+                r"delegate\s+task:?\s+.+\s+to\s+"
+            ]
+
+            for pattern in create_assign_patterns:
+                if re.search(pattern, normalized_input, re.IGNORECASE):
+                    logger.debug("Detected create+assign pattern", pattern=pattern)
+                    return IntentMatch(
+                        intent="create_and_assign_task",
+                        confidence=0.95,
+                        alternatives=[("assign_task", 0.8), ("create_task", 0.7)]
+                    )
 
             # First, try keyword-based matching for high confidence
             keyword_match = self._keyword_based_classification(normalized_input)
